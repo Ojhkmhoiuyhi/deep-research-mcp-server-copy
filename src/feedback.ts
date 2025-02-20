@@ -13,7 +13,7 @@ export async function generateFeedback({
   const geminiPrompt = `${systemPrompt()}\n\nGiven the following query from the user, ask some follow up questions to clarify the research direction. Return a maximum of ${numQuestions} questions, but feel free to return less if the original query is clear: <query>${query}</query>`;
 
   const geminiResponse = await o3MiniModel.generateContent(geminiPrompt);
-  const textResponse = await geminiResponse.response.text();
+  const textResponse = geminiResponse.response.text();
 
   try {
     const parsedResult = z.object({
