@@ -3,6 +3,7 @@ export declare class OutputManager {
     private progressLines;
     private progressArea;
     private initialized;
+    private lastLogMessage;
     constructor();
     log(...args: any[]): void;
     updateProgress(progress: ResearchProgress): void;

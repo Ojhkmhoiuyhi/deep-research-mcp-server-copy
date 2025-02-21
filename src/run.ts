@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as readline from 'node:readline';
+import { research } from './deep-research.js';
 import {
-  deepResearch,
   writeFinalReport,
   type ResearchProgress,
 } from './deep-research.js';
@@ -20,92 +20,140 @@ const rl = readline.createInterface({
   output: process.stdout,
 });
 
-// Helper function to get user input
+// Helper function to get user input (Promise-based)
 function askQuestion(query: string): Promise<string> {
   return new Promise(resolve => {
     rl.question(query, answer => {
-      resolve(answer);
+      resolve(answer.trim()); // Trim whitespace from answer
     });
   });
 }
 
-// run the agent
+// Run the agent - main function
 async function run() {
-  // Get initial query
-  const initialQuery = await askQuestion('What would you like to research? ');
+  try {
+    // Get initial query from command line arguments or user input
+    let initialQuery: string;
+    if (process.argv.length > 2) {
+      initialQuery = process.argv.slice(2).join(' '); // Get query from command line args
+      log(`Research query from command line: "${initialQuery}"`);
+    } else {
+      initialQuery = await askQuestion('What would you like to research? ');
+    }
 
-  // Get breath and depth parameters
-  const breadth =
-    Number.parseInt(
-      await askQuestion(
-        'Enter research breadth (recommended 2-10, default 4): ',
-      ),
-      10,
-    ) || 4;
-  const depth =
-    Number.parseInt(
-      await askQuestion('Enter research depth (recommended 1-5, default 2): '),
-      10,
-    ) || 2;
+    if (!initialQuery) {
+      log('Research query cannot be empty. Please provide a query.');
+      rl.close();
+      return; // Exit if no query is provided
+    }
 
-  log("Creating research plan...");
+    // Get breadth and depth parameters with input validation and defaults
+    let breadth: number;
+    const breadthInput = await askQuestion(
+      'Enter research breadth (recommended 2-10, default 4): ',
+    );
+    breadth = Number.parseInt(breadthInput, 10);
+    breadth = isNaN(breadth) ? 4 : Math.max(1, Math.min(10, breadth)); // Default 4, range 1-10
 
-  // Generate follow-up questions
-  const followUpQuestions = await generateFeedback({
-    query: initialQuery,
-  });
+    let depth: number;
+    const depthInput = await askQuestion(
+      'Enter research depth (recommended 1-5, default 2): ',
+    );
+    depth = Number.parseInt(depthInput, 10);
+    depth = isNaN(depth) ? 2 : Math.max(1, Math.min(5, depth)); // Default 2, range 1-5
 
-  log(
-    '\nTo better understand your research needs, please answer these follow-up questions:',
-  );
+    log(`Research parameters: Breadth = ${breadth}, Depth = ${depth}`);
+    log('Creating research plan...');
 
-  // Collect answers to follow-up questions
-  const answers: string[] = [];
-  for (const question of followUpQuestions) {
-    const answer = await askQuestion(`\n${question}\nYour answer: `);
-    answers.push(answer);
-  }
+    // Generate follow-up questions
+    const feedbackResult = await generateFeedback({
+      query: initialQuery,
+    });
 
-  // Combine all information for deep research
-  const combinedQuery = `
+    // Check if feedbackResult is null or undefined
+    const followUpQuestions = feedbackResult?.followUpQuestions || [];
+
+    let answers: string[] = [];
+
+    if (followUpQuestions && followUpQuestions.length > 0) {
+      log(
+        '\nTo better understand your research needs, please answer these follow-up questions:',
+      );
+
+      // Collect answers to follow-up questions
+      answers = [];
+      for (const question of followUpQuestions) {
+        const answer = await askQuestion(`\n${question}\nYour answer: `);
+        answers.push(answer);
+      }
+    } else {
+      log('\nNo follow-up questions needed. Proceeding with research.');
+    }
+
+    // Combine all information for deep research
+    const combinedQuery = `
 Initial Query: ${initialQuery}
-Follow-up Questions and Answers:
-${followUpQuestions.map((q: string, i: number) => `Q: ${q}\nA: ${answers[i]}`).join('\n')}
+${
+      followUpQuestions && followUpQuestions.length > 0
+        ? `Follow-up Questions and Answers:\n${followUpQuestions
+            .map((q: string, i: number) => `Q: ${q}\nA: ${answers[i]}`)
+            .join('\n')}`
+        : ''
+    }
 `;
 
-  log('\nResearching your topic...');
+    log('\nResearching your topic...');
+    log('\nStarting research with progress tracking...\n');
 
-  log('\nStarting research with progress tracking...\n');
-  
-  const { learnings, visitedUrls } = await deepResearch({
-    query: combinedQuery,
-    breadth,
-    depth,
-    onProgress: (
-      progress: ResearchProgress
-    ) => {
-      output.updateProgress(progress);
-    },
-  });
+    const { learnings, visitedUrls } = await research({
+      query: combinedQuery,
+      breadth,
+      depth,
+      onProgress: (progress: ResearchProgress) => {
+        output.updateProgress(progress);
+      },
+    });
 
-  log(`\n\nLearnings:\n\n${learnings.join('\n')}`);
-  log(
-    `\n\nVisited URLs (${visitedUrls.length}):\n\n${visitedUrls.join('\n')}`,
-  );
-  log('Writing final report...');
+    if (!learnings || learnings.length === 0) {
+      log('\nNo significant learnings were found during the research.');
+    } else {
+      log(`\n\nLearnings:\n\n${learnings.join('\n')}`);
+    }
 
-  const report = await writeFinalReport({
-    prompt: combinedQuery,
-    learnings,
-    visitedUrls,
-  });
+    if (visitedUrls && visitedUrls.length > 0) {
+      log(
+        `\n\nVisited URLs (${visitedUrls.length}):\n\n${visitedUrls.join('\n')}`,
+      );
+    } else {
+      log('\nNo URLs were visited during the research.');
+    }
 
-  // Save report to file
-  await fs.writeFile('output.md', report, 'utf-8');
+    log('Writing final report...');
 
-  console.log(`\n\nFinal Report:\n\n${report}`);
-  console.log('\nReport has been saved to output.md');
-  rl.close();
+    const report = await writeFinalReport({
+      prompt: combinedQuery,
+      learnings,
+      visitedUrls,
+    });
+
+    // Save report to file
+    const reportFilename = 'output.md';
+    await fs.writeFile(reportFilename, report, 'utf-8');
+
+    console.log(`\n\nFinal Report:\n\n${report}`);
+    console.log(`\nReport has been saved to ${reportFilename}`);
+  } catch (error) {
+    console.error('Error during research process:', error); // More informative error log
+    log(`\nAn error occurred during the research process: ${
+      error instanceof Error ? error.message : String(error)
+    }`); // Log error to output manager as well
+  } finally {
+    rl.close(); // Ensure readline interface is always closed
+    log('Research process finished.'); // Indicate process completion
+  }
 }
 
-run().catch(console.error);
+// Start the research process
+run().catch(error => {
+  console.error('Unhandled error in run function:', error); // Catch any unhandled errors
+});

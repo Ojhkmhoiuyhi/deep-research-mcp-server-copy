@@ -1,17 +1,31 @@
 // Constants for ANSI escape codes to improve readability
 const ESC = '\x1B[';
-const CLEAR_LINE = `${ESC}0J`; // Clear line from cursor to end
+const CLEAR_LINE = `${ESC}2K`; // Clear the entire line
 const CURSOR_TO_LINE = (line) => `${ESC}${line};1H`; // Move cursor to specified line and column 1
 const CURSOR_UP = (lines) => `${ESC}${lines}A`; // Move cursor up by specified lines
 const CURSOR_DOWN = (lines) => `${ESC}${lines}B`; // Move cursor down by specified lines
-const NUMBER_OF_PROGRESS_LINES = 4; // Constant for the number of progress lines
+const DEFAULT_NUMBER_OF_PROGRESS_LINES = 4; // Constant for the number of progress lines
 export class ProgressManager {
     lastProgress;
-    numberOfProgressLines = NUMBER_OF_PROGRESS_LINES;
+    numberOfProgressLines;
     initialized = false;
-    constructor() {
+    terminalHeight;
+    constructor(numberOfProgressLines = DEFAULT_NUMBER_OF_PROGRESS_LINES) {
+        this.numberOfProgressLines = numberOfProgressLines;
+        this.terminalHeight = process.stdout.rows || 24;
         // Initialize terminal with empty lines for progress display
-        process.stdout.write('\n'.repeat(this.numberOfProgressLines));
+        try {
+            process.stdout.write('\n'.repeat(this.numberOfProgressLines));
+            this.initialized = true;
+        }
+        catch (error) {
+            console.error("Failed to initialize ProgressManager:", error);
+            this.initialized = false;
+        }
+        // Update terminal height on resize
+        process.stdout.on('resize', () => {
+            this.terminalHeight = process.stdout.rows || 24;
+        });
     }
     /**
      * Draws a single progress bar string.
@@ -35,13 +49,12 @@ export class ProgressManager {
      * @param progress - An object containing the current research progress.
      */
     updateProgress(progress) {
+        if (!this.initialized)
+            return;
         // Store progress for potential redraw or access
         this.lastProgress = progress;
         // Determine the starting line for progress bars to position them at the bottom of the terminal
-        const terminalHeight = process.stdout.rows || 24;
-        const progressStartLine = terminalHeight - this.numberOfProgressLines;
-        // Move cursor to the start of the progress area and clear lines
-        process.stdout.write(`${CURSOR_TO_LINE(progressStartLine)}${CLEAR_LINE}`); // Move cursor to line and clear
+        const progressStartLine = this.terminalHeight - this.numberOfProgressLines;
         // Generate progress bar lines
         const lines = [
             this.drawProgressBar('Depth:   ', progress.totalDepth - progress.currentDepth, progress.totalDepth, '█'),
@@ -52,16 +65,33 @@ export class ProgressManager {
         if (progress.currentQuery) {
             lines.push(`Current:  ${progress.currentQuery}`);
         }
-        // Output all progress lines, joined by newlines, to the terminal
-        process.stdout.write(`${lines.join('\n')}\n`);
-        // Move the cursor up to the beginning of the progress display area
-        process.stdout.write(CURSOR_UP(this.numberOfProgressLines)); // Move cursor back up
+        try {
+            // Move cursor to the start of the progress area and clear lines
+            process.stdout.write(`${CURSOR_TO_LINE(progressStartLine)}`);
+            for (let i = 0; i < this.numberOfProgressLines; i++) {
+                process.stdout.write(`${CLEAR_LINE}\n`);
+            }
+            // Move cursor back to the start of the progress area
+            process.stdout.write(`${CURSOR_TO_LINE(progressStartLine)}`);
+            // Output all progress lines, joined by newlines, to the terminal
+            process.stdout.write(`${lines.join('\n')}\n`);
+        }
+        catch (error) {
+            console.error("Failed to update progress:", error);
+        }
     }
     /**
      * Stops the progress display and moves the cursor below the progress area.
      */
     stop() {
-        // Move cursor down past the progress area, ensuring subsequent output is below the progress bars
-        process.stdout.write(`${CURSOR_DOWN(this.numberOfProgressLines)}\n`); // Move cursor down
+        if (!this.initialized)
+            return;
+        try {
+            // Move cursor down past the progress area, ensuring subsequent output is below the progress bars
+            process.stdout.write(`${CURSOR_DOWN(this.numberOfProgressLines)}\n`); // Move cursor down
+        }
+        catch (error) {
+            console.error("Failed to stop ProgressManager:", error);
+        }
     }
 }

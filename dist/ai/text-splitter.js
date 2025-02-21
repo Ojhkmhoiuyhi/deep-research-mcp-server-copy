@@ -1,9 +1,21 @@
+import { getEncoding } from "js-tiktoken";
+// Define a configuration object for model-specific settings
+const modelConfig = {
+    "o200k_base": { maxTokens: 8192 },
+    "cl100k_base": { maxTokens: 8192 }, // Add cl100k_base config
+    // Add more models and their maxTokens values here
+};
 class TextSplitter {
-    chunkSize = 1000;
-    chunkOverlap = 200;
+    chunkSize = 600;
+    chunkOverlap = 100;
+    modelName = "o200k_base";
+    maxTokens; //  Remove default value
     constructor(fields) {
         this.chunkSize = fields?.chunkSize ?? this.chunkSize;
         this.chunkOverlap = fields?.chunkOverlap ?? this.chunkOverlap;
+        this.modelName = fields?.modelName ?? this.modelName;
+        // Look up maxTokens from modelConfig, or use a default if not found
+        this.maxTokens = modelConfig[this.modelName]?.maxTokens ?? 8192; // Default to 8192 if model not in config
         if (this.chunkOverlap >= this.chunkSize) {
             throw new Error('Cannot have chunkOverlap >= chunkSize');
         }
@@ -66,52 +78,75 @@ which is longer than the specified ${this.chunkSize}`);
     }
 }
 export class RecursiveCharacterTextSplitter extends TextSplitter {
-    separators = ['\n\n', '\n', '.', ',', '>', '<', ' ', ''];
+    separators = ["\n\n", "\n", " ", ""];
     constructor(fields) {
         super(fields);
         this.separators = fields?.separators ?? this.separators;
     }
     splitText(text) {
-        const finalChunks = [];
-        // Get appropriate separator to use
-        let separator = this.separators[this.separators.length - 1] ?? '';
-        for (const s of this.separators) {
-            if (s === '') {
-                separator = s;
-                break;
-            }
-            if (text.includes(s)) {
-                separator = s;
-                break;
-            }
-        }
-        // Now that we have the separator, split the text
-        let splits;
-        if (separator) {
-            splits = text.split(separator);
-        }
-        else {
-            splits = text.split('');
-        }
-        // Now go merging things, recursively splitting longer texts.
-        let goodSplits = [];
-        for (const s of splits) {
-            if (s.length < this.chunkSize) {
-                goodSplits.push(s);
-            }
-            else {
-                if (goodSplits.length) {
-                    const mergedText = this.mergeSplits(goodSplits, separator);
-                    finalChunks.push(...mergedText);
-                    goodSplits = [];
+        const splits = [];
+        let currentText = text;
+        for (const separator of this.separators) {
+            const split = currentText.split(separator);
+            const newSplits = [];
+            for (const s of split) {
+                if (s.length > this.chunkSize) {
+                    // Recursively split the text
+                    const recursiveSplits = this.splitText(s);
+                    newSplits.push(...recursiveSplits);
                 }
-                const otherInfo = this.splitText(s);
-                finalChunks.push(...otherInfo);
+                else {
+                    newSplits.push(s);
+                }
+            }
+            currentText = newSplits.join(separator); // Join with the current separator for the next iteration
+        }
+        // Handle any remaining text that couldn't be split
+        if (currentText.length > 0) {
+            splits.push(currentText);
+        }
+        return splits;
+    }
+}
+export class TiktokenTextSplitter extends TextSplitter {
+    tokenizer;
+    contextLength;
+    constructor(fields) {
+        super(fields);
+        this.contextLength = fields?.contextLength ?? 0;
+        try {
+            this.tokenizer = getEncoding(this.modelName);
+        }
+        catch (e) {
+            console.warn(`Failed to load ${this.modelName}, falling back to cl100k_base`);
+            this.tokenizer = getEncoding("cl100k_base");
+        }
+    }
+    splitText(text) {
+        const encoded = this.tokenizer.encode(text);
+        const chunks = [];
+        let currentChunk = [];
+        let currentChunkLength = 0;
+        for (const token of encoded) {
+            currentChunk.push(token);
+            currentChunkLength++;
+            if (currentChunkLength >= this.chunkSize) {
+                chunks.push(currentChunk);
+                currentChunk = [];
+                currentChunkLength = 0;
             }
         }
-        if (goodSplits.length) {
-            const mergedText = this.mergeSplits(goodSplits, separator);
-            finalChunks.push(...mergedText);
+        if (currentChunk.length > 0) {
+            chunks.push(currentChunk);
+        }
+        // Apply overlap
+        const finalChunks = [];
+        for (let i = 0; i < chunks.length; i++) {
+            const chunk = chunks[i];
+            let overlapStart = Math.max(0, i * (this.chunkSize - this.chunkOverlap));
+            let overlapEnd = Math.min(encoded.length, (i + 1) * this.chunkSize);
+            const chunkWithOverlap = encoded.slice(overlapStart, overlapEnd);
+            finalChunks.push(this.tokenizer.decode(chunkWithOverlap));
         }
         return finalChunks;
     }

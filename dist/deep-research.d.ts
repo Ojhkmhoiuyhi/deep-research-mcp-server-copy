@@ -7,22 +7,20 @@ export type ResearchProgress = {
     totalQueries: number;
     completedQueries: number;
 };
-type ResearchResult = {
-    learnings: string[];
-    visitedUrls: string[];
-};
-export declare function writeFinalReport({ prompt, learnings, visitedUrls, }: {
+interface WriteFinalReportParams {
     prompt: string;
     learnings: string[];
     visitedUrls: string[];
-}): Promise<string>;
-export declare function deepResearch({ query, breadth, depth, learnings, visitedUrls, onProgress, }: {
+}
+export declare function writeFinalReport({ prompt, learnings, visitedUrls, }: WriteFinalReportParams): Promise<string>;
+export declare function research({ query, breadth, depth, onProgress }: {
     query: string;
     breadth: number;
     depth: number;
-    learnings?: string[];
-    visitedUrls?: string[];
     onProgress?: (progress: ResearchProgress) => void;
-}): Promise<ResearchResult>;
+}): Promise<{
+    learnings: string[];
+    visitedUrls: string[];
+}>;
 export {};
 //# sourceMappingURL=deep-research.d.ts.map

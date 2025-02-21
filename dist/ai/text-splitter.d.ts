@@ -1,10 +1,17 @@
 interface TextSplitterParams {
     chunkSize: number;
     chunkOverlap: number;
+    modelName?: string;
+    maxTokens?: number;
+}
+interface TiktokenTextSplitterParams extends TextSplitterParams {
+    contextLength?: number;
 }
 declare abstract class TextSplitter implements TextSplitterParams {
     chunkSize: number;
     chunkOverlap: number;
+    modelName: string;
+    maxTokens: number;
     constructor(fields?: Partial<TextSplitterParams>);
     abstract splitText(text: string): string[];
     createDocuments(texts: string[]): string[];
@@ -17,7 +24,15 @@ export interface RecursiveCharacterTextSplitterParams extends TextSplitterParams
 }
 export declare class RecursiveCharacterTextSplitter extends TextSplitter implements RecursiveCharacterTextSplitterParams {
     separators: string[];
-    constructor(fields?: Partial<RecursiveCharacterTextSplitterParams>);
+    constructor(fields?: Partial<TextSplitterParams> & {
+        separators?: string[];
+    });
+    splitText(text: string): string[];
+}
+export declare class TiktokenTextSplitter extends TextSplitter {
+    private tokenizer;
+    private contextLength;
+    constructor(fields?: Partial<TiktokenTextSplitterParams>);
     splitText(text: string): string[];
 }
 export {};

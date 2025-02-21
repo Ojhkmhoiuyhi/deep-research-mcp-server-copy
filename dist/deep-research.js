@@ -3,95 +3,118 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { compact } from 'lodash-es';
 import pLimit from 'p-limit';
 import { z } from 'zod';
-import { trimPrompt, o3MiniModel } from './ai/providers.js';
-import { systemPrompt } from './prompt.js';
+
+
+
+
+
+
+
+
+
+import pkg from 'lodash';
+const { escape } = pkg;
+import { trimPrompt, o3MiniModel, learningPromptTemplate } from './ai/providers.js';
+import { systemPrompt, serpQueryPromptTemplate } from './prompt.js';
+import { RecursiveCharacterTextSplitter } from './ai/text-splitter.js';
 // Helper function to log to stderr
 // biome-ignore lint/suspicious/noExplicitAny: <explanation>
 const log = (...args) => {
     process.stderr.write(`${args.map(arg => typeof arg === 'string' ? arg : JSON.stringify(arg)).join(' ')}\n`);
 };
-// increase this if you have higher API rate limits
-const ConcurrencyLimit = 2;
-// Initialize Firecrawl with optional API key and optional base url
-const firecrawl = new FirecrawlApp({
-    apiKey: process.env.FIRECRAWL_API_KEY ?? '',
-    apiUrl: process.env.FIRECRAWL_BASE_URL,
-});
-// Initialize Gemini API once, using the correct model ID
-if (!process.env.GEMINI_API_KEY) {
+// Configuration from environment variables
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-pro"; // Default to gemini-pro
+const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY;
+const FIRECRAWL_BASE_URL = process.env.FIRECRAWL_BASE_URL;
+const CONCURRENCY_LIMIT = parseInt(process.env.CONCURRENCY_LIMIT || "5", 10); // Default to 5
+if (!GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY environment variable is not set');
 }
-const googleAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = googleAI.getGenerativeModel({ model: "gemini-2.0-pro-exp-02-05" });
-// Example: Enhanced prompt for generating SERP queries
-const serpQueryPromptTemplate = `
-You are an expert researcher and SEO specialist. Given the following prompt from the user, generate a list of SERP queries to research the topic. Return a maximum of {{numQueries}} queries, but feel free to return less if the original prompt is clear. Make sure each query is unique and not similar to each other. Each query should be optimized for search engines and designed to retrieve relevant and high-quality results.
-
-User Prompt: {{query}}
-
-{% if learnings %}
-Here are some learnings from previous research, use them to generate more specific queries: {{learnings.join('\n')}}
-{% endif %}
-`;
-// take en user query, return a list of SERP queries
-async function generateSerpQueries({ query, numQueries = 3, learnings, }) {
-    const prompt = serpQueryPromptTemplate
-        .replace('{{numQueries}}', numQueries.toString())
-        .replace('{{query}}', query);
-    const geminiResult = await model.generateContent(`${systemPrompt()}\n\n${prompt}\n\n${learnings
-        ? `Here are some learnings from previous research, use them to generate more specific queries: ${learnings.join('\\n')}`
-        : ''}`);
-    log('geminiResult:', JSON.stringify(geminiResult, null, 2));
-    if (!geminiResult.response?.text) {
-        log('geminiResult.response.text is missing, cannot parse queries.');
-        return [];
-    }
+if (!FIRECRAWL_API_KEY) {
+    log("Warning: FIRECRAWL_API_KEY environment variable is not set.  Firecrawl functionality will be limited.");
+    // Consider throwing an error here instead, depending on your requirements
+}
+const googleAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+const model = googleAI.getGenerativeModel({ model: GEMINI_MODEL });
+const firecrawl = new FirecrawlApp({
+    apiKey: FIRECRAWL_API_KEY ?? '',
+    apiUrl: FIRECRAWL_BASE_URL,
+});
+const ConcurrencyLimit = CONCURRENCY_LIMIT;
+const DEFAULT_NUM_QUERIES = 3;
+async function generateSerpQueries({ query: rawQuery, numQueries = DEFAULT_NUM_QUERIES, learnings = [], researchGoal = "Initial query", initialQuery, depth = 1, breadth = 1, }) {
     try {
-        if (!geminiResult.response?.candidates?.[0]?.content?.parts?.[0]) {
-            log('geminiResult.response.text is missing, cannot parse queries.');
-            return [];
+        const query = escape(rawQuery);
+        const sanitizedLearnings = learnings?.map(escape);
+        const prompt = serpQueryPromptTemplate
+            .replace('{{query}}', query)
+            .replace('{{numQueries}}', String(numQueries))
+            .replace('{{researchGoal}}', researchGoal || "General Research")
+            .replace('{{initialQuery}}', initialQuery || rawQuery)
+            .replace('{{depth}}', depth?.toString() || "1")
+            .replace('{{breadth}}', breadth?.toString() || "1");
+        let learningsString = '';
+        if (Array.isArray(sanitizedLearnings) && sanitizedLearnings.length > 0) {
+            learningsString = sanitizedLearnings.join('\n');
         }
-        const geminiText = geminiResult.response?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!geminiText) {
-            log('geminiResult.response.text is missing, cannot parse queries.');
-            return [];
-        }
+        const finalPrompt = prompt.replace('{{learnings.join("\\n")}}', learningsString);
+        log(`generateSerpQueries prompt: ${finalPrompt}`);
+        const geminiResult = await o3MiniModel.generateContent(finalPrompt);
+        log('geminiResult:', JSON.stringify(geminiResult, null, 2));
         const parsedResult = z.object({
-            queries: z.array(z.object({ query: z.string(), researchGoal: z.string() }))
-        }).safeParse(JSON.parse(geminiText));
+            queries: z.array(z.object({
+                query: z.string(),
+                researchGoal: z.string().default("General research"),
+            })),
+        }).safeParse(JSON.parse(geminiResult.response.text()));
         if (!parsedResult.success) {
-            log('Failed to parse queries:', parsedResult.error);
+            log('Failed to parse SERP queries:', parsedResult.error);
+            log(`Failed prompt: ${finalPrompt}`);
             return [];
         }
-        const res = parsedResult.data ?? { queries: [] };
+        const res = parsedResult.data;
         log('Created queries:', res.queries);
-        return res.queries.slice(0, numQueries);
-        // biome-ignore lint/suspicious/noExplicitAny: <explanation>
+        const uniqueQueries = Array.from(new Set(res.queries.map(q => q.query))).map(q => res.queries.find(query => query.query === q));
+        return uniqueQueries.slice(0, numQueries);
     }
-    catch (e) {
-        log('Error in generateSerpQueries:', e);
+    catch (error) {
+        if (error instanceof Error) {
+            log(`Error in generateSerpQueries: ${error.message}`, { stack: error.stack });
+        }
+        else {
+            log(`Error in generateSerpQueries: An unknown error occurred`, { error });
+        }
         return [];
     }
 }
-async function processSerpResult({ query, result, numLearnings = 3, numFollowUpQuestions = 3, }) {
+async function processSerpResult({ query, result, numLearnings = 3, }) {
     const contents = compact(result.data.map(item => item.markdown)).map(content => trimPrompt(content, 100_000));
     const urls = compact(result.data.map(item => item.url));
     log(`Ran ${query}, found ${contents.length} contents and ${urls.length} URLs:`, urls);
-    const googleAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    const model = googleAI.getGenerativeModel({ model: "gemini-2.0-pro-exp-02-05" });
-    const geminiResult = await o3MiniModel.generateContent(`${systemPrompt()}\n\nGiven the following contents from a SERP search for the query <query>${query}</query>, generate a list of learnings from the contents. Return a maximum of ${numLearnings} learnings, but feel free to return less if the contents are clear. Make sure each learning is unique and not similar to each other. The learnings should be concise and to the point, as detailed and information dense as possible. Make sure to include any entities like people, places, companies, products, things, etc in the learnings, as well as any exact metrics, numbers, or dates. The learnings will be used to research the topic further.\n\n<contents>${contents
-        .map(content => `<content>\n${content}\n</content>`)
-        .join('\n')}</contents>`);
-    log('geminiResult:', JSON.stringify(geminiResult, null, 2));
-    const parsedResult = z.object({
-        learnings: z.array(z.string()),
-        followUpQuestions: z.array(z.string()),
-    }).safeParse(JSON.parse(geminiResult.response.text()));
-    if (!parsedResult.success) {
-        log('Failed to parse learnings:', parsedResult.error);
-        return { learnings: [], followUpQuestions: [] };
+    // Initialize the RecursiveCharacterTextSplitter with a context-aware chunk size
+    const splitter = new RecursiveCharacterTextSplitter({ chunkSize: 140 });
+    // Split the contents into smaller chunks
+    const chunks = contents.flatMap(content => splitter.splitText(content));
+    // Process each chunk with the LLM
+    const learnings = [];
+    for (const chunk of chunks) {
+        const prompt = learningPromptTemplate
+            .replace("{{query}}", query)
+            .replace("{{title}}", result.data[0]?.title || "No Title")
+            .replace("{{url}}", result.data[0]?.url || "No URL")
+            .replace("{{content}}", chunk);
+        const o3MiniModel2 = googleAI.getGenerativeModel({ model: "gemini-2.0-pro-exp-02-05" });
+        const geminiResult = await o3MiniModel2.generateContent(prompt);
+        const parsedResult = z.object({
+            learnings: z.array(z.string()),
+            followUpQuestions: z.array(z.string()),
+        }).safeParse(JSON.parse(geminiResult.response.text()));
+        if (parsedResult.success) {
+            learnings.push(...(parsedResult.data.learnings ?? []));
+        }
     }
-    return { learnings: parsedResult.data.learnings ?? [], followUpQuestions: parsedResult.data.followUpQuestions.slice(0, numFollowUpQuestions) ?? [] };
+    return { learnings: learnings.slice(0, numLearnings) ?? [], followUpQuestions: [] };
 }
 // Insert helper functions before writeFinalReport
 // New helper function to generate an outline from the prompt and learnings
@@ -120,120 +143,209 @@ async function writeReportFromOutline(outline, learnings) {
         return 'Report could not be generated.';
     }
 }
-// Modify writeFinalReport to export it
-export async function writeFinalReport({ prompt, learnings, visitedUrls, }) {
+// New helper function to generate a summary from the learnings
+async function generateSummary(learnings) {
     try {
-        log('Writing final report with:', {
-            numLearnings: learnings.length,
-            numUrls: visitedUrls.length,
-            urls: visitedUrls
-        });
-        // 1. Generate outline
-        const outline = await generateOutline(prompt, learnings);
-        // 2. Write report based on outline
-        const report = await writeReportFromOutline(outline, learnings);
-        // Append the visited URLs section to the report
-        const urlsSection = `\n\n## Sources\n\n${visitedUrls.map(url => `- ${url}`).join("\\n")}`;
-        log('Generated URL section:', urlsSection);
-        return report + urlsSection;
+        const summaryPrompt = `${systemPrompt()}\n\nGenerate a concise summary of the following learnings:\nLearnings:\n${learnings.join("\\n")}`;
+        const summaryResponse = await o3MiniModel.generateContent(summaryPrompt);
+        const summaryText = await summaryResponse.response.text();
+        return summaryText;
     }
     catch (error) {
-        log('Error in writeFinalReport:', error);
-        return 'Final report generation failed.';
+        log('Error in generateSummary:', error);
+        return 'Summary could not be generated.';
     }
 }
-export async function deepResearch({ query, breadth, depth, learnings = [], visitedUrls = [], onProgress, }) {
-    const progress = {
+// New helper function to generate a title from the prompt and learnings
+async function generateTitle(prompt, learnings) {
+    try {
+        const titlePrompt = `${systemPrompt()}\n\nGenerate a concise and informative title for a research report based on the prompt and learnings:\nPrompt: ${prompt}\nLearnings:\n${learnings.join("\\n")}`;
+        const titleResponse = await o3MiniModel.generateContent(titlePrompt);
+        const titleText = await titleResponse.response.text();
+        return titleText;
+    }
+    catch (error) {
+        log('Error in generateTitle:', error);
+        return 'Title could not be generated.';
+    }
+}
+const DEFAULT_DEPTH = 2;
+const DEFAULT_BREADTH = 5;
+async function deepResearch({ query, depth = DEFAULT_DEPTH, breadth = DEFAULT_BREADTH, learnings: initialLearnings = [], visitedUrls: initialVisitedUrls = [], onProgress, reportProgress = (progress) => {
+    log('Research Progress:', progress);
+}, initialQuery = query, researchGoal = "Deep dive research", }) {
+    let visitedUrls = [...initialVisitedUrls];
+    let learnings = [...initialLearnings];
+    // Initialize progress object
+    let progress = {
         currentDepth: depth,
         totalDepth: depth,
         currentBreadth: breadth,
         totalBreadth: breadth,
-        totalQueries: 0,
+        totalQueries: breadth * depth,
         completedQueries: 0,
     };
-    const reportProgress = (update) => {
-        Object.assign(progress, update);
-        onProgress?.(progress);
-    };
-    log("Generating SERP queries...");
+    if (depth <= 0) {
+        log("Reached research depth limit.");
+        return { learnings, visitedUrls };
+    }
+    if (visitedUrls.length > 20) {
+        log("Reached visited URLs limit.");
+        return { learnings, visitedUrls };
+    }
     const serpQueries = await generateSerpQueries({
         query,
-        learnings,
         numQueries: breadth,
+        learnings,
+        researchGoal,
+        initialQuery,
+        depth,
+        breadth,
     });
-    reportProgress({
-        totalQueries: serpQueries.length,
-        currentQuery: serpQueries[0]?.query
-    });
-    const plimit = pLimit(ConcurrencyLimit);
-    log("Processing SERP results...");
-    const results = await Promise.all(serpQueries.map((serpQuery) => plimit(async () => {
+    const limit = pLimit(ConcurrencyLimit);
+    const limitedProcessResult = async (serpQuery) => {
+        // Declare newUrls and newLearnings here, outside the try block
+        let newUrls = [];
+        let newLearnings = [];
         try {
-            const result = await firecrawl.search(serpQuery.query, {
-                timeout: 15000,
-                limit: breadth,
-                scrapeOptions: { formats: ['markdown'] },
-            });
-            if (!result || !result.data) {
-                log(`Invalid Firecrawl result for query: ${serpQuery.query}`);
+            if (visitedUrls.includes(serpQuery.query)) {
+                log(`Already visited URL for query: ${serpQuery.query}, skipping.`);
+                return {
+                    learnings: [],
+                    visitedUrls: [],
+                }; // Return empty result to avoid affecting overall learnings
+            }
+            try {
+                log(`Firecrawl scraping for query: ${serpQuery.query}...`);
+                const result = await firecrawl.search(serpQuery.query, {
+                    timeout: 15000,
+                    limit: breadth,
+                    scrapeOptions: { formats: ['markdown'] },
+                });
+                // Add type assertion to result to ensure TypeScript knows the structure
+                const firecrawlResult = result;
+                if (!firecrawlResult || !firecrawlResult.data) {
+                    log(`Invalid Firecrawl result for query: ${serpQuery.query}`);
+                    return {
+                        learnings: [],
+                        visitedUrls: [],
+                    };
+                }
+                // Collect URLs from this search, using optional chaining for safety
+                newUrls = compact(firecrawlResult.data.map(item => item.url));
+                const newBreadth = Math.ceil(breadth / 2);
+                const newDepth = depth - 1;
+                log("Researching deeper...");
+                const processResult = await processSerpResult({
+                    query: serpQuery.query,
+                    result,
+                });
+                newLearnings = processResult?.learnings ?? []; // Assign here to pre-declared variable
+                const allLearnings = [...learnings, ...newLearnings];
+                const allUrls = [...visitedUrls, ...newUrls];
+                if (newDepth > 0) {
+                    log(`Researching deeper, breadth: ${newBreadth}, depth: ${newDepth}`);
+                    progress = {
+                        currentDepth: newDepth,
+                        currentBreadth: newBreadth,
+                        completedQueries: progress.completedQueries + 1,
+                        currentQuery: serpQuery.query,
+                        totalDepth: progress.totalDepth,
+                        totalBreadth: progress.totalBreadth,
+                        totalQueries: progress.totalQueries,
+                    };
+                    if (onProgress) {
+                        onProgress(progress);
+                    }
+                    // Enhanced Query Refinement
+                    // const keywords = extractKeywords(query + " " + learnings.join(" ")); // Keyword extraction and query expansion functions are not defined in the provided code.
+                    // const refinedQuery = expandQuery(serpQuery.researchGoal, keywords);
+                    // const nextQuery = refinedQuery; // Using original query for now as refinement is not implemented
+                    const nextQuery = serpQuery.query; // Using original query for now as refinement is not implemented
+                    return deepResearch({
+                        query: nextQuery,
+                        breadth: newBreadth,
+                        depth: newDepth,
+                        learnings: allLearnings,
+                        visitedUrls: allUrls,
+                        onProgress,
+                        reportProgress,
+                        initialQuery,
+                        researchGoal,
+                    });
+                }
+                else {
+                    log("Reached maximum research depth.");
+                    return {
+                        learnings: newLearnings,
+                        visitedUrls: newUrls,
+                    };
+                }
+            }
+            catch (error) {
+                log(`Error processing query ${serpQuery.query}: ${error}`);
                 return {
                     learnings: [],
                     visitedUrls: [],
                 };
             }
-            // Collect URLs from this search
-            const newUrls = compact(result.data.map(item => item.url));
-            const newBreadth = Math.ceil(breadth / 2);
-            const newDepth = depth - 1;
-            log("Researching deeper...");
-            const newLearnings = await processSerpResult({
-                query: serpQuery.query,
-                result,
-                numFollowUpQuestions: newBreadth,
-            });
-            const allLearnings = [...learnings, ...newLearnings.learnings];
-            const allUrls = [...visitedUrls, ...newUrls];
-            if (newDepth > 0) {
-                log(`Researching deeper, breadth: ${newBreadth}, depth: ${newDepth}`);
-                reportProgress({
-                    currentDepth: newDepth,
-                    currentBreadth: newBreadth,
-                    completedQueries: progress.completedQueries + 1,
-                    currentQuery: serpQuery.query,
-                });
-                const nextQuery = `
-            Previous research goal: ${serpQuery.researchGoal}
-            Follow-up research directions: ${newLearnings.followUpQuestions.map(q => `\n${q}`).join('')}
-          `.trim();
-                return deepResearch({
-                    query: nextQuery,
-                    breadth: newBreadth,
-                    depth: newDepth,
-                    learnings: allLearnings,
-                    visitedUrls: allUrls,
-                    onProgress,
-                });
+        }
+        finally {
+            progress.completedQueries += 1; // Increment completed queries count
+            if (reportProgress) {
+                reportProgress(progress); // Report progress after each query
             }
-            reportProgress({
-                currentDepth: 0,
-                completedQueries: progress.completedQueries + 1,
-                currentQuery: serpQuery.query,
-            });
-            return {
-                learnings: allLearnings,
-                visitedUrls: allUrls,
-            };
         }
-        catch (e) {
-            log(`Firecrawl search failed for query ${serpQuery.query}: ${e}`);
-            return {
-                learnings: [],
-                visitedUrls: [],
-            };
-        }
-    })));
-    return {
-        learnings: [...new Set(results.flatMap(r => r.learnings))],
-        visitedUrls: [...new Set(results.flatMap(r => r.visitedUrls))],
     };
+    const promises = serpQueries.map((serpQuery) => limit(() => limitedProcessResult(serpQuery)));
+    const results = await Promise.all(promises);
+    visitedUrls = compact(results.flatMap(result => result?.visitedUrls));
+    learnings = compact(results.flatMap(result => result?.learnings));
+    return { learnings, visitedUrls };
+}
+export async function writeFinalReport({ prompt, learnings, visitedUrls, }) {
+    log("Generating outline...");
+    const outline = await generateOutline(prompt, learnings);
+    log("Outline generated:", outline);
+    log("Writing report from outline...");
+    const report = await writeReportFromOutline(outline, learnings);
+    log("Report generated.");
+    log("Generating summary...");
+    const summary = await generateSummary(learnings);
+    log("Summary generated.");
+    log("Generating title...");
+    const title = await generateTitle(prompt, learnings);
+    log("Title generated:", title);
+    const finalReport = `
+# ${title}
+
+## Summary
+${summary}
+
+## Outline
+${outline}
+
+## Report
+${report}
+
+## Learnings
+${learnings.map(learning => `- ${learning}`).join('\n')}
+
+## Visited URLs
+${visitedUrls.map(url => `- ${url}`).join('\n')}
+`;
+    log("Final report generated.");
+    return finalReport;
+}
+export async function research({ query, breadth, depth, onProgress }) {
+    log(`Starting research for query: ${query}`);
+    const researchResult = await deepResearch({ query, breadth, depth, onProgress });
+    log("Deep research completed. Generating final report...");
+    const finalReport = await writeFinalReport({
+        prompt: query,
+        learnings: researchResult.learnings,
+        visitedUrls: researchResult.visitedUrls,
+    });
+    log("Final report written. Research complete.");
+    return researchResult;
 }

@@ -146,7 +146,7 @@ The tool returns:
 For standalone usage without MCP, you can use the CLI interface:
 
 ```bash
-npm run start "what are latest developments in ai research agents"
+npm run start "what are latest developments in ai research agents using nodejs and typescript"
 ```
 
 To test the MCP server with the inspector:

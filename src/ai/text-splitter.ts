@@ -1,16 +1,40 @@
+import { Tiktoken, getEncoding, TiktokenEncoding } from "js-tiktoken";
+
 interface TextSplitterParams {
   chunkSize: number;
 
   chunkOverlap: number;
+
+  modelName?: string;
+
+  maxTokens?: number;
 }
 
+interface TiktokenTextSplitterParams extends TextSplitterParams {
+  contextLength?: number;
+}
+
+// Define a configuration object for model-specific settings
+const modelConfig: { [modelName: string]: { maxTokens: number } } = {
+  "o200k_base": { maxTokens: 8192 },
+  "cl100k_base": { maxTokens: 8192 }, // Add cl100k_base config
+  // Add more models and their maxTokens values here
+};
+
 abstract class TextSplitter implements TextSplitterParams {
-  chunkSize = 1000;
-  chunkOverlap = 200;
+  chunkSize = 600;
+  chunkOverlap = 100;
+  modelName: string = "o200k_base";
+  maxTokens: number; //  Remove default value
 
   constructor(fields?: Partial<TextSplitterParams>) {
     this.chunkSize = fields?.chunkSize ?? this.chunkSize;
     this.chunkOverlap = fields?.chunkOverlap ?? this.chunkOverlap;
+    this.modelName = fields?.modelName ?? this.modelName;
+
+    // Look up maxTokens from modelConfig, or use a default if not found
+    this.maxTokens = modelConfig[this.modelName]?.maxTokens ?? 8192; // Default to 8192 if model not in config
+
     if (this.chunkOverlap >= this.chunkSize) {
       throw new Error('Cannot have chunkOverlap >= chunkSize');
     }
@@ -92,56 +116,91 @@ export class RecursiveCharacterTextSplitter
   extends TextSplitter
   implements RecursiveCharacterTextSplitterParams
 {
-  separators: string[] = ['\n\n', '\n', '.', ',', '>', '<', ' ', ''];
+  separators: string[] = ["\n\n", "\n", " ", ""];
 
-  constructor(fields?: Partial<RecursiveCharacterTextSplitterParams>) {
+  constructor(fields?: Partial<TextSplitterParams> & { separators?: string[] }) {
     super(fields);
     this.separators = fields?.separators ?? this.separators;
   }
 
   splitText(text: string): string[] {
-    const finalChunks: string[] = [];
+    const splits: string[] = [];
+    let currentText = text;
 
-    // Get appropriate separator to use
-    let separator: string = this.separators[this.separators.length - 1] ?? '';
-    for (const s of this.separators) {
-      if (s === '') {
-        separator = s;
-        break;
-      }
-      if (text.includes(s)) {
-        separator = s;
-        break;
-      }
-    }
+    for (const separator of this.separators) {
+      const split = currentText.split(separator);
+      const newSplits: string[] = [];
 
-    // Now that we have the separator, split the text
-    let splits: string[];
-    if (separator) {
-      splits = text.split(separator);
-    } else {
-      splits = text.split('');
-    }
-
-    // Now go merging things, recursively splitting longer texts.
-    let goodSplits: string[] = [];
-    for (const s of splits) {
-      if (s.length < this.chunkSize) {
-        goodSplits.push(s);
-      } else {
-        if (goodSplits.length) {
-          const mergedText = this.mergeSplits(goodSplits, separator);
-          finalChunks.push(...mergedText);
-          goodSplits = [];
+      for (const s of split) {
+        if (s.length > this.chunkSize) {
+          // Recursively split the text
+          const recursiveSplits = this.splitText(s);
+          newSplits.push(...recursiveSplits);
+        } else {
+          newSplits.push(s);
         }
-        const otherInfo = this.splitText(s);
-        finalChunks.push(...otherInfo);
+      }
+
+      currentText = newSplits.join(separator); // Join with the current separator for the next iteration
+    }
+
+    // Handle any remaining text that couldn't be split
+    if (currentText.length > 0) {
+      splits.push(currentText);
+    }
+
+    return splits;
+  }
+}
+
+export class TiktokenTextSplitter extends TextSplitter {
+  private tokenizer: Tiktoken;
+  private contextLength: number;
+
+  constructor(fields?: Partial<TiktokenTextSplitterParams>) {
+    super(fields);
+    this.contextLength = fields?.contextLength ?? 0;
+    try {
+      this.tokenizer = getEncoding(this.modelName as TiktokenEncoding);
+    } catch (e: any) {
+      console.warn(`Failed to load ${this.modelName}, falling back to cl100k_base`);
+      this.tokenizer = getEncoding("cl100k_base");
+    }
+  }
+
+  splitText(text: string): string[] {
+    const encoded = this.tokenizer.encode(text);
+    const chunks: number[][] = [];
+    let currentChunk: number[] = [];
+    let currentChunkLength = 0;
+
+    for (const token of encoded) {
+      currentChunk.push(token);
+      currentChunkLength++;
+
+      if (currentChunkLength >= this.chunkSize) {
+        chunks.push(currentChunk);
+        currentChunk = [];
+        currentChunkLength = 0;
       }
     }
-    if (goodSplits.length) {
-      const mergedText = this.mergeSplits(goodSplits, separator);
-      finalChunks.push(...mergedText);
+
+    if (currentChunk.length > 0) {
+      chunks.push(currentChunk);
     }
+
+    // Apply overlap
+    const finalChunks: string[] = [];
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      let overlapStart = Math.max(0, i * (this.chunkSize - this.chunkOverlap));
+      let overlapEnd = Math.min(encoded.length, (i + 1) * this.chunkSize);
+
+      const chunkWithOverlap = encoded.slice(overlapStart, overlapEnd);
+      finalChunks.push(this.tokenizer.decode(chunkWithOverlap));
+    }
+
     return finalChunks;
   }
 }
+

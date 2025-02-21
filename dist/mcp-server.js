@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { deepResearch, writeFinalReport } from "./deep-research.js";
+import { research, writeFinalReport } from "./deep-research.js";
 // Get the directory name of the current module
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 // Load environment variables from .env.local
@@ -34,11 +34,10 @@ server.tool("deep-research", "Perform deep research on a topic using AI-powered 
         log("Parameters:", { depth, breadth, existingLearningsCount: existingLearnings.length });
         // Track research progress
         let currentProgress = "";
-        const result = await deepResearch({
+        const result = await research({
             query,
-            depth,
             breadth,
-            learnings: existingLearnings,
+            depth,
             onProgress: (progress) => {
                 const progressMsg = `Depth ${progress.currentDepth}/${progress.totalDepth}, Query ${progress.completedQueries}/${progress.totalQueries}: ${progress.currentQuery || ""}`;
                 if (progressMsg !== currentProgress) {
@@ -51,7 +50,8 @@ server.tool("deep-research", "Perform deep research on a topic using AI-powered 
                             progressToken: 0,
                             data: progressMsg
                         }
-                    }).catch(error => {
+                    })
+                        .catch(error => {
                         log("Error sending progress notification:", error);
                     });
                 }
@@ -65,7 +65,8 @@ server.tool("deep-research", "Perform deep research on a topic using AI-powered 
                 progressToken: 0,
                 data: "Research completed, generating report..."
             }
-        }).catch(error => {
+        })
+            .catch(error => {
             log("Error sending final progress notification:", error);
         });
         // Generate final report

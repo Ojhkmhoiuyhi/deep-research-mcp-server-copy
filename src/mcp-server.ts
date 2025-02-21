@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { deepResearch, writeFinalReport } from "./deep-research.js";
+import { research, writeFinalReport, type ResearchProgress } from "./deep-research.js";
+import { ZodError } from 'zod';
 
 // Get the directory name of the current module
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -40,7 +41,7 @@ server.tool(
     breadth: z.number().min(1).max(5).describe("How broad to make each research level (1-5)"),
     existingLearnings: z.array(z.string()).optional().describe("Optional array of existing research findings to build upon")
   },
-  async ({ query, depth, breadth, existingLearnings = [] }) => {
+  async ({ query, depth, breadth, existingLearnings = [] }): Promise<{ content: { type: 'text'; text: string; }[]; metadata: { learnings: string[]; visitedUrls: string[]; stats: { totalLearnings: number; totalSources: number; }; }; } | { content: { type: 'text'; text: string; }[]; isError: boolean; }> => {
     try {
       log("Starting research with query:", query);
       log("Parameters:", { depth, breadth, existingLearningsCount: existingLearnings.length });
@@ -48,12 +49,11 @@ server.tool(
       // Track research progress
       let currentProgress = "";
       
-      const result = await deepResearch({
+      const result = await research({
         query,
-        depth,
         breadth,
-        learnings: existingLearnings,
-        onProgress: (progress) => {
+        depth,
+        onProgress: (progress: ResearchProgress) => {
           const progressMsg = `Depth ${progress.currentDepth}/${progress.totalDepth}, Query ${progress.completedQueries}/${progress.totalQueries}: ${progress.currentQuery || ""}`;
           if (progressMsg !== currentProgress) {
             currentProgress = progressMsg;
@@ -66,7 +66,8 @@ server.tool(
                 progressToken: 0,
                 data: progressMsg
               }
-            }).catch(error => {
+            })
+            .catch(error => {
               log("Error sending progress notification:", error);
             });
           }
@@ -82,7 +83,8 @@ server.tool(
           progressToken: 0,
           data: "Research completed, generating report..."
         }
-      }).catch(error => {
+      })
+      .catch(error => {
         log("Error sending final progress notification:", error);
       });
 
@@ -97,9 +99,9 @@ server.tool(
 
       return {
         content: [
-          { 
-            type: "text", 
-            text: report 
+          {
+            type: "text",
+            text: report
           }
         ],
         metadata: {
@@ -115,7 +117,7 @@ server.tool(
       log("Error in deep research:", error);
       const errorMessage = error instanceof Error ? error.message : String(error);
       log("Error message:", errorMessage);
-      
+
       return {
         content: [
           {

@@ -3,7 +3,8 @@ export declare class ProgressManager {
     private lastProgress;
     private numberOfProgressLines;
     private initialized;
-    constructor();
+    private terminalHeight;
+    constructor(numberOfProgressLines?: number);
     /**
      * Draws a single progress bar string.
      *
