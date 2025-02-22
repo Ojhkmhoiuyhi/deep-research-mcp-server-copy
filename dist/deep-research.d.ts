@@ -1,13 +1,17 @@
-export type ResearchProgress = {
+export interface ProcessResult {
+    learnings: string[];
+    visitedUrls: string[];
+}
+export interface ResearchProgress {
+    currentQuery?: string;
     currentDepth: number;
     totalDepth: number;
     currentBreadth: number;
     totalBreadth: number;
-    currentQuery?: string;
     totalQueries: number;
     completedQueries: number;
     progressMsg?: string;
-};
+}
 export interface researchProgress {
     progressMsg: string;
 }

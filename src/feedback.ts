@@ -1,10 +1,10 @@
-import { z } from 'zod';
-import pRetry from 'p-retry';
 import { LRUCache } from 'lru-cache';
+import pRetry from 'p-retry';
+import { z } from 'zod';
 
 import { o3MiniModel } from './ai/providers.js';
-import { systemPrompt, feedbackPromptTemplate } from './prompt.js';
 import { OutputManager } from './output-manager.js';
+import { feedbackPromptTemplate, systemPrompt } from './prompt.js';
 
 interface FeedbackOptions {
   query: string;

@@ -1,15 +1,14 @@
 import { z } from 'zod';
 import FirecrawlApp from '@mendable/firecrawl-js';
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import { LRUCache } from 'lru-cache';
 import { compact } from 'lodash-es';
 import pLimit from 'p-limit';
 import pkg from 'lodash';
 const { escape } = pkg;
-import { trimPrompt, o3MiniModel, generateTextEmbedding } from './ai/providers.js';
-import { systemPrompt, serpQueryPromptTemplate, learningPromptTemplate } from './prompt.js';
+import { trimPrompt, o3MiniModel, o3MiniModel2, callGeminiProConfigurable, generateTextEmbedding } from './ai/providers.js';
+import { systemPrompt, serpQueryPromptTemplate, learningPromptTemplate, generateGeminiPrompt } from './prompt.js';
 import { RecursiveCharacterTextSplitter } from './ai/text-splitter.js';
-import { error } from 'node:console';
+import { extractJsonFromText, safeParseJSON, stringifyJSON } from './utils/json.js';
 // Helper function to log to stderr
 // biome-ignore lint/suspicious/noExplicitAny: <explanation>
 const log = (...args) => {
@@ -28,8 +27,6 @@ if (!FIRECRAWL_API_KEY) {
     log("Warning: FIRECRAWL_API_KEY environment variable is not set.  Firecrawl functionality will be limited.");
     // Consider throwing an error here instead, depending on your requirements
 }
-const googleAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const model = googleAI.getGenerativeModel({ model: GEMINI_MODEL });
 const firecrawl = new FirecrawlApp({
     apiKey: FIRECRAWL_API_KEY ?? '',
     apiUrl: FIRECRAWL_BASE_URL,
@@ -49,6 +46,27 @@ const serpQueryCache = new LRUCache({
 const reportCache = new LRUCache({
     max: 20, // Adjust max size as needed
 });
+function logResearchProgress(progressData) {
+    const prettyProgressJson = stringifyJSON(progressData, true); // Pretty print for logs
+    if (prettyProgressJson) {
+        console.log("Research Progress Update:\n", prettyProgressJson); // Log pretty JSON
+    }
+    else {
+        console.error("Error stringifying research progress data for logging.");
+        console.log("Raw progress data:", progressData); // Fallback to raw object if stringify fails
+    }
+}
+function cacheSearchResults(query, results) {
+    const minifiedResultsJson = stringifyJSON(results); // Minified for efficient storage
+    if (minifiedResultsJson) {
+        // ... code to store minifiedResultsJson in your cache (e.g., LRUCache) ...
+        console.log(`Cached results for query: "${query}" (JSON length: ${minifiedResultsJson.length})`);
+    }
+    else {
+        console.error("Error stringifying search results for caching.");
+        // Handle caching error
+    }
+}
 async function generateSerpQueries({ query: rawQuery, numQueries = DEFAULT_NUM_QUERIES, learnings = [], researchGoal = "Initial query", initialQuery, depth = 1, breadth = 1, }) {
     try {
         // 1. Create a cache key
@@ -102,8 +120,8 @@ async function generateSerpQueries({ query: rawQuery, numQueries = DEFAULT_NUM_Q
         }
         const finalPrompt = prompt.replace('{{learnings.join("\\n")}}', learningsString);
         log(`generateSerpQueries prompt: ${finalPrompt}`);
-        let geminiResult; // Declare geminiResult here
-        let jsonString = '{}'; // Declare jsonString with a default value
+        let geminiResult;
+        let jsonString = '{}';
         try {
             geminiResult = await o3MiniModel.generateContent(finalPrompt);
             log('geminiResult:', JSON.stringify(geminiResult, null, 2));
@@ -113,42 +131,31 @@ async function generateSerpQueries({ query: rawQuery, numQueries = DEFAULT_NUM_Q
             }
             else {
                 log("Error: Gemini response text is not a string or is missing.");
-                jsonString = '{}'; // Default to empty JSON object string to prevent further errors
+                jsonString = '{}';
             }
         }
         catch (error) {
             log("Error: Unexpected structure in Gemini response - cannot access text.");
-            log("Gemini response:", geminiResult); // Log the full response for debugging
-            jsonString = '{}'; // Default to empty JSON object string, or handle differently
+            log("Gemini response:", geminiResult);
+            jsonString = '{}';
         }
-        // 1. Initial cleanup: remove backticks and whitespace
-        // Clean up jsonString to remove backticks and whitespace that might cause parsing errors
-        jsonString = jsonString.trim();
-        if (jsonString.startsWith('```json'))
-            jsonString = jsonString.substring(7);
-        if (jsonString.endsWith('```'))
-            jsonString = jsonString.slice(0, -3);
-        // 2. Regex-based JSON extraction: find content between first '{' and last '}'
-        const jsonRegex = /\{[\s\S]*\}/; // Matches from first '{' to last '}'
-        const regexMatch = jsonString.match(jsonRegex);
-        if (regexMatch) {
-            jsonString = regexMatch[0]; // Use the matched JSON-like substring
-            log("Extracted JSON using regex:", jsonString); // Log extracted JSON
+        const rawQueriesJSON = extractJsonFromText(jsonString);
+        let serpQueries = [];
+        if (rawQueriesJSON && Array.isArray(rawQueriesJSON)) {
+            serpQueries = rawQueriesJSON.slice(0, numQueries)
+                .map((rawQuery) => {
+                const parsedQuery = SerpQuerySchema.safeParse({
+                    query: rawQuery?.query || rawQuery, // Handle cases where query is directly a string or in an object
+                    researchGoal: researchGoal, // Or get researchGoal from rawQuery if available
+                });
+                return parsedQuery.success ? parsedQuery.data : null; // Return parsed data or null if parsing fails
+            })
+                .filter(Boolean); // Filter out null values from failed parses
         }
         else {
-            log("Regex JSON extraction failed, using fallback empty JSON.");
-            jsonString = '{}'; // Fallback to empty JSON if regex fails
+            console.warn("Failed to generate or parse SERP queries from Gemini response, using fallback to empty array.");
+            serpQueries = [];
         }
-        if (error instanceof SyntaxError) {
-            log("SyntaxError in generateSerpQueries - raw response text:");
-            if (geminiResult.response?.candidates?.[0]?.content?.parts?.[0]?.text) {
-                log(geminiResult.response.candidates[0].content.parts[0].text); // Log the raw response for debugging
-            }
-            else {
-                log("Raw response text unavailable due to unexpected response structure.");
-            }
-        }
-        let serpQueries = JSON.parse(jsonString);
         // 4. Store the result in the cache
         try {
             serpQueryCache.set(cacheKey, serpQueries);
@@ -157,12 +164,11 @@ async function generateSerpQueries({ query: rawQuery, numQueries = DEFAULT_NUM_Q
         catch (e) {
             console.error("Error setting to cache:", e);
         }
-        return serpQueries.slice(0, numQueries);
+        return serpQueries;
     }
     catch (error) {
         console.error("Error in generateSerpQueries:", error);
-        // Consider a more specific error message
-        throw new Error(`Failed to generate SERP queries: ${error}`);
+        return []; // Return an empty array in case of any error during query generation
     }
 }
 async function processSerpResult({ query, result, numLearnings = 3, }) {
@@ -181,7 +187,6 @@ async function processSerpResult({ query, result, numLearnings = 3, }) {
             .replace("{{title}}", result.data[0]?.title || "No Title")
             .replace("{{url}}", result.data[0]?.url || "No URL")
             .replace("{{content}}", chunk);
-        const o3MiniModel2 = googleAI.getGenerativeModel({ model: "gemini-2.0-pro-exp-02-05" });
         const geminiResult = await o3MiniModel2.generateContent(prompt);
         const parsedResult = z.object({
             learnings: z.array(z.string()),
@@ -281,10 +286,16 @@ async function deepResearch({ query, depth = DEFAULT_DEPTH, breadth = DEFAULT_BR
     });
     const limit = pLimit(ConcurrencyLimit);
     const limitedProcessResult = async (serpQuery) => {
-        // Declare newUrls and newLearnings here, outside the try block
-        let newUrls = [];
         let newLearnings = [];
+        let newUrls = [];
         try {
+            log(`Generating Gemini prompt for query: ${serpQuery.query}...`);
+            const prompt = generateGeminiPrompt({ query: serpQuery.query, researchGoal: serpQuery.researchGoal, learnings });
+            log("Gemini Prompt: " + prompt.substring(0, 200) + "..."); // Log first 200 chars of prompt
+            const geminiResponseText = await callGeminiProConfigurable(prompt);
+            const geminiResult = await processGeminiResponse(geminiResponseText);
+            newLearnings = geminiResult.learnings;
+            newUrls = geminiResult.urls;
             if (visitedUrls.includes(serpQuery.query)) {
                 log(`Already visited URL for query: ${serpQuery.query}, skipping.`);
                 return {
@@ -317,7 +328,7 @@ async function deepResearch({ query, depth = DEFAULT_DEPTH, breadth = DEFAULT_BR
                     query: serpQuery.query,
                     result,
                 });
-                newLearnings = processResult?.learnings ?? []; // Assign here to pre-declared variable
+                const newLearnings = processResult?.learnings ?? []; // Assign here to pre-declared variable
                 const allLearnings = [...learnings, ...newLearnings];
                 const allUrls = [...visitedUrls, ...newUrls];
                 if (newDepth > 0) {
@@ -366,18 +377,25 @@ async function deepResearch({ query, depth = DEFAULT_DEPTH, breadth = DEFAULT_BR
                     visitedUrls: [],
                 };
             }
-        }
-        finally {
-            progress.completedQueries += 1; // Increment completed queries count
-            if (reportProgress) {
-                reportProgress(progress); // Report progress after each query
+            finally {
+                progress.completedQueries += 1; // Increment completed queries count
+                if (reportProgress) {
+                    reportProgress(progress); // Report progress after each query
+                }
             }
+        }
+        catch (error) {
+            log(`Error processing query ${serpQuery.query}: ${error}`);
+            return {
+                learnings: [],
+                visitedUrls: [],
+            };
         }
     };
     const promises = serpQueries.map((serpQuery) => limit(() => limitedProcessResult(serpQuery)));
     const results = await Promise.all(promises);
-    visitedUrls = compact(results.flatMap(result => result?.visitedUrls));
-    learnings = compact(results.flatMap(result => result?.learnings));
+    visitedUrls = compact(results.flatMap((result) => result?.visitedUrls));
+    learnings = compact(results.flatMap((result) => result?.learnings));
     return { learnings, visitedUrls };
 }
 export async function writeFinalReport({ prompt, learnings, visitedUrls, }) {
@@ -476,4 +494,29 @@ async function someFunction() {
     else {
         console.error("Failed to generate text embedding.");
     }
+}
+async function processGeminiResponse(geminiResponseText) {
+    const responseData = safeParseJSON(geminiResponseText, { items: [] }); // Use type and default
+    let learnings = [];
+    let urls = [];
+    if (Array.isArray(responseData.items)) {
+        console.log("Successfully parsed Gemini response into items array, processing items...");
+        responseData.items.forEach(item => {
+            if (item?.learning && typeof item.learning === 'string') {
+                learnings.push(item.learning.trim()); // Extract 'learning' if present and trim whitespace
+            }
+            if (item?.url && typeof item.url === 'string') {
+                urls.push(item.url.trim()); // Extract 'url' if present and trim whitespace
+            }
+            else if (item?.link && typeof item.link === 'string') {
+                urls.push(item.link.trim()); // Also check for 'link' as alternative URL key
+            }
+            // Add more logic here to extract other relevant information from responseData.items
+        });
+    }
+    else {
+        console.warn("Warning: Gemini response did not parse into expected JSON format (items array). Returning default empty results.");
+        return { learnings: [], urls: [] }; // Return defaults on parse failure
+    }
+    return { learnings: learnings, urls: urls };
 }
