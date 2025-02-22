@@ -17,7 +17,7 @@ export const o3MiniModel = genAIModel;
 export const o3MiniModel2 = genAIModel2;
 export const o3MiniModel3 = genAIModel3;
 
-const MinChunkSize = 140;
+const MinChunkSize = 140; // TODO: Consider making this configurable or a named constant in a config file
 const encoder = getEncoding('o200k_base');
 
 // trim prompt to maximum context size
@@ -35,8 +35,8 @@ export function trimPrompt(
   }
 
   const overflowTokens = length - maxTokens;
-  const chunkSize = prompt.length - Math.floor(overflowTokens * 3);
-  if (chunkSize < MinChunkSize) {
+  const chunkSize = prompt.length - Math.floor(overflowTokens * 3); // Formula for chunk size - explain rationale?
+  if (chunkSize < MinChunkSize) { // Minimum chunk size to prevent overly aggressive trimming
     return prompt.slice(0, MinChunkSize);
   }
 
@@ -53,8 +53,8 @@ export function trimPrompt(
   return trimPrompt(trimmedPrompt, maxTokens);
 }
 
-// Example: Function for managing prompts
-function createPrompt(template: string, variables: Record<string, string>): string {
+// Function for managing prompts
+export function createPrompt(template: string, variables: Record<string, string>): string { // Added type hints for parameters
   let prompt = template;
   for (const key in variables) {
     prompt = prompt.replace(`{{${key}}}`, variables[key] ?? '');
@@ -73,3 +73,43 @@ const myPrompt = "Your very long prompt here...";
 const trimmedPrompt = trimPrompt(myPrompt, splitter.maxTokens);
 
 // Now use the trimmedPrompt with your language model
+
+/**
+ * Generates a text embedding using the Gemini API 'text-embedding-004' model.
+ *
+ * @param text The input text to generate an embedding for.
+ * @returns A Promise that resolves to a Float32Array representing the embedding,
+ *          or null if there was an error.
+ */
+export async function generateTextEmbedding(text: string): Promise<number[] | null> {
+  try {
+    const embeddingModel = googleAI.getGenerativeModel({ model: "embedding-004" }); // Specify embedding model - embedding-001 is the latest recommended
+    const result = await embeddingModel.embedContent(text);
+    const embedding = result.embedding?.values;
+
+    if (!embedding) {
+      console.error("Gemini API: No embedding returned in the response.");
+      return null;
+    }
+
+    return embedding as number[]; // Explicitly cast to number[]
+  } catch (error: any) {
+    console.error("Gemini API - Error generating text embedding:", error);
+    return null;
+  }
+}
+
+export async function callGeminiProConfigurable(prompt: string, modelName: string = "gemini-pro", temperature?: number, safetySettings?: any): Promise<string> {
+  const model = googleAI.getGenerativeModel({ model: modelName });
+
+  // Trim the prompt before sending it to the model
+  const trimmedPrompt = trimPrompt(prompt, 8192); // Assuming maxTokens is 8192, adjust if needed
+
+  try {
+    const response = await model.generateContent(trimmedPrompt); // Use trimmedPrompt here
+    return response.response?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+  } catch (error) {
+    console.error("GeminiPro API Error:", error);
+    return "";
+  }
+}

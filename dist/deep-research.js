@@ -1,14 +1,15 @@
+import { z } from 'zod';
 import FirecrawlApp from '@mendable/firecrawl-js';
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { LRUCache } from 'lru-cache';
 import { compact } from 'lodash-es';
 import pLimit from 'p-limit';
-import { z } from 'zod';
 import pkg from 'lodash';
 const { escape } = pkg;
-import { trimPrompt, o3MiniModel } from './ai/providers.js';
+import { trimPrompt, o3MiniModel, generateTextEmbedding } from './ai/providers.js';
 import { systemPrompt, serpQueryPromptTemplate, learningPromptTemplate } from './prompt.js';
 import { RecursiveCharacterTextSplitter } from './ai/text-splitter.js';
+import { error } from 'node:console';
 // Helper function to log to stderr
 // biome-ignore lint/suspicious/noExplicitAny: <explanation>
 const log = (...args) => {
@@ -34,6 +35,11 @@ const firecrawl = new FirecrawlApp({
     apiUrl: FIRECRAWL_BASE_URL,
 });
 const ConcurrencyLimit = CONCURRENCY_LIMIT;
+// take en user query, return a list of SERP queries
+const SerpQuerySchema = z.object({
+    query: z.string(),
+    researchGoal: z.string(),
+});
 const DEFAULT_NUM_QUERIES = 3;
 // Create an LRU cache instance
 const serpQueryCache = new LRUCache({
@@ -96,25 +102,62 @@ async function generateSerpQueries({ query: rawQuery, numQueries = DEFAULT_NUM_Q
         }
         const finalPrompt = prompt.replace('{{learnings.join("\\n")}}', learningsString);
         log(`generateSerpQueries prompt: ${finalPrompt}`);
-        const geminiResult = await o3MiniModel.generateContent(finalPrompt);
-        log('geminiResult:', JSON.stringify(geminiResult, null, 2));
-        const parsedResult = z.object({
-            queries: z.array(z.object({
-                query: z.string(),
-                researchGoal: z.string(),
-            })),
-        });
-        const res = parsedResult.parse(JSON.parse(geminiResult.response.text()));
-        const uniqueQueries = Array.from(new Set(res.queries.map(q => q.query))).map(q => res.queries.find(query => query.query === q));
+        let geminiResult; // Declare geminiResult here
+        let jsonString = '{}'; // Declare jsonString with a default value
+        try {
+            geminiResult = await o3MiniModel.generateContent(finalPrompt);
+            log('geminiResult:', JSON.stringify(geminiResult, null, 2));
+            const geminiText = geminiResult.response?.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (typeof geminiText === 'string') {
+                jsonString = geminiText;
+            }
+            else {
+                log("Error: Gemini response text is not a string or is missing.");
+                jsonString = '{}'; // Default to empty JSON object string to prevent further errors
+            }
+        }
+        catch (error) {
+            log("Error: Unexpected structure in Gemini response - cannot access text.");
+            log("Gemini response:", geminiResult); // Log the full response for debugging
+            jsonString = '{}'; // Default to empty JSON object string, or handle differently
+        }
+        // 1. Initial cleanup: remove backticks and whitespace
+        // Clean up jsonString to remove backticks and whitespace that might cause parsing errors
+        jsonString = jsonString.trim();
+        if (jsonString.startsWith('```json'))
+            jsonString = jsonString.substring(7);
+        if (jsonString.endsWith('```'))
+            jsonString = jsonString.slice(0, -3);
+        // 2. Regex-based JSON extraction: find content between first '{' and last '}'
+        const jsonRegex = /\{[\s\S]*\}/; // Matches from first '{' to last '}'
+        const regexMatch = jsonString.match(jsonRegex);
+        if (regexMatch) {
+            jsonString = regexMatch[0]; // Use the matched JSON-like substring
+            log("Extracted JSON using regex:", jsonString); // Log extracted JSON
+        }
+        else {
+            log("Regex JSON extraction failed, using fallback empty JSON.");
+            jsonString = '{}'; // Fallback to empty JSON if regex fails
+        }
+        if (error instanceof SyntaxError) {
+            log("SyntaxError in generateSerpQueries - raw response text:");
+            if (geminiResult.response?.candidates?.[0]?.content?.parts?.[0]?.text) {
+                log(geminiResult.response.candidates[0].content.parts[0].text); // Log the raw response for debugging
+            }
+            else {
+                log("Raw response text unavailable due to unexpected response structure.");
+            }
+        }
+        let serpQueries = JSON.parse(jsonString);
         // 4. Store the result in the cache
         try {
-            serpQueryCache.set(cacheKey, uniqueQueries);
+            serpQueryCache.set(cacheKey, serpQueries);
             log(`Cached SERP queries for key: ${cacheKey}`);
         }
         catch (e) {
             console.error("Error setting to cache:", e);
         }
-        return uniqueQueries.slice(0, numQueries);
+        return serpQueries.slice(0, numQueries);
     }
     catch (error) {
         console.error("Error in generateSerpQueries:", error);
@@ -422,4 +465,15 @@ export async function research({ query, depth = 3, breadth = 3, existingLearning
     });
     log("Final report written. Research complete.");
     return researchResult;
+}
+async function someFunction() {
+    const textToEmbed = "This is the text I want to embed.";
+    const embedding = await generateTextEmbedding(textToEmbed);
+    if (embedding) {
+        console.log("Generated Embedding:", embedding);
+        // ... use the embedding for semantic search, clustering, etc. ...
+    }
+    else {
+        console.error("Failed to generate text embedding.");
+    }
 }
