@@ -14,7 +14,7 @@ export const systemPrompt = (): string => {
     "Present your output in well-structured markdown format, using bullet or numbered lists where appropriate."
   ];
 
-  return `You are an expert researcher. Today is ${now}. Follow these instructions carefully when responding:
+  return `You are an Professional Doctorate level Researcher, with a deep understanding of the subject matter and the ability to research it in depth. Today is ${now}. Follow these instructions carefully when responding:
 - ${instructions.join("\n- ")}`;
 };
 

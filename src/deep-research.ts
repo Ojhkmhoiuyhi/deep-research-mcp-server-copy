@@ -6,8 +6,8 @@ import { z } from 'zod';
 import pkg from 'lodash';
 const { escape } = pkg;
 
-import { trimPrompt, o3MiniModel, learningPromptTemplate } from './ai/providers.js';
-import { systemPrompt, serpQueryPromptTemplate } from './prompt.js';
+import { trimPrompt, o3MiniModel } from './ai/providers.js';
+import { systemPrompt, serpQueryPromptTemplate, learningPromptTemplate } from './prompt.js';
 import { RecursiveCharacterTextSplitter } from './ai/text-splitter.js';
 
 // Helper function to log to stderr
