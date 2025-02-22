@@ -1,4 +1,5 @@
 import type { ResearchProgress } from './deep-research.js';
+import { writeFileSync } from 'fs';
 
 export class OutputManager {
   private progressLines = 4;
@@ -86,5 +87,15 @@ export class OutputManager {
 
     // Restore cursor position
     process.stdout.write('\x1b[u');
+  }
+
+  saveResearchReport(reportContent: string) {
+    const filename = 'output.md';
+    try {
+      writeFileSync(filename, reportContent);
+      this.log(`Final report saved to ${filename}`);
+    } catch (error) {
+      this.log(`Error saving report to ${filename}:`, error);
+    }
   }
 }
