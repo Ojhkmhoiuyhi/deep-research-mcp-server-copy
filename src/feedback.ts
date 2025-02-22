@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import pRetry from 'p-retry';
+import { LRUCache } from 'lru-cache';
 
 import { o3MiniModel } from './ai/providers.js';
 import { systemPrompt, feedbackPromptTemplate } from './prompt.js';
@@ -15,6 +16,11 @@ interface FeedbackOptions {
 }
 
 const output = new OutputManager();
+
+// Create LRU cache for feedback responses
+const feedbackCache = new LRUCache<string, FeedbackResponse>({
+  max: 50, // Adjust max size as needed
+});
 
 // Define Zod schema for expected JSON response from Gemini
 const FeedbackResponseSchema = z.object({
@@ -51,6 +57,35 @@ export async function generateFeedback({
   breadth = 1,
   existingLearnings = [],
 }: FeedbackOptions): Promise<FeedbackResponse> {
+  // 1. Create cache key
+  let cacheKey: string;
+  try {
+    const keyObject: any = { query, numQuestions, researchGoal, depth, breadth, existingLearnings };
+    // Omit default values for a more efficient key (optional, as before)
+    if (numQuestions === 3) delete keyObject.numQuestions;
+    if (researchGoal === "Understand the user's query") delete keyObject.researchGoal;
+    if (depth === 1) delete keyObject.depth;
+    if (breadth === 1) delete keyObject.breadth;
+    const learningsHash = existingLearnings.length > 0 ? String(existingLearnings.reduce((acc, val) => acc + val.charCodeAt(0), 0)) : ''; // Hash learnings
+    keyObject.learningsHash = learningsHash;
+    cacheKey = JSON.stringify(keyObject);
+  } catch (keyError) {
+    console.error("Error creating feedback cache key:", keyError);
+    cacheKey = 'default-feedback-key'; // Fallback key in case of error
+  }
+
+  // 2. Check cache
+  try {
+    const cachedFeedback = feedbackCache.get(cacheKey);
+    if (cachedFeedback) {
+      output.log(`Returning cached feedback for key: ${cacheKey}`);
+      return cachedFeedback;
+    }
+  } catch (cacheGetError) {
+    console.error("Error getting feedback from cache:", cacheGetError);
+    // Continue without cache if there's an error
+  }
+
   const context = `
 Research Goal: ${researchGoal}
 Current Depth: ${depth}
@@ -98,6 +133,14 @@ Existing Learnings: ${existingLearnings.join('\n')}
       output.log(`Raw Gemini Response causing JSON error:\n${textResponse}`); // Log the problematic raw response
       // Consider setting a default or error feedback response here if JSON parsing fails critically
       feedbackResponse = { analysis: "Failed to parse feedback response. Please check logs for raw output." }; // Provide a fallback
+    }
+
+    // 3. Store in cache after successful API call and parsing
+    try {
+      feedbackCache.set(cacheKey, feedbackResponse);
+      output.log(`Cached feedback for key: ${cacheKey}`);
+    } catch (cacheSetError) {
+      console.error("Error setting feedback to cache:", cacheSetError);
     }
 
   } catch (apiError) {

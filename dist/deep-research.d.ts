@@ -6,6 +6,14 @@ export type ResearchProgress = {
     currentQuery?: string;
     totalQueries: number;
     completedQueries: number;
+    progressMsg?: string;
+};
+export interface researchProgress {
+    progressMsg: string;
+}
+type ResearchResult = {
+    learnings: string[];
+    visitedUrls: string[];
 };
 interface WriteFinalReportParams {
     prompt: string;
@@ -13,14 +21,13 @@ interface WriteFinalReportParams {
     visitedUrls: string[];
 }
 export declare function writeFinalReport({ prompt, learnings, visitedUrls, }: WriteFinalReportParams): Promise<string>;
-export declare function research({ query, breadth, depth, onProgress }: {
+export declare function research({ query, depth, breadth, existingLearnings, onProgress }: ResearchOptions): Promise<ResearchResult>;
+export interface ResearchOptions {
     query: string;
-    breadth: number;
     depth: number;
+    breadth: number;
+    existingLearnings?: string[];
     onProgress?: (progress: ResearchProgress) => void;
-}): Promise<{
-    learnings: string[];
-    visitedUrls: string[];
-}>;
+}
 export {};
 //# sourceMappingURL=deep-research.d.ts.map

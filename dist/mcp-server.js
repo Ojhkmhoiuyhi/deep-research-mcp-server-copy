@@ -5,6 +5,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { research, writeFinalReport } from "./deep-research.js";
+import { LRUCache } from 'lru-cache';
 // Get the directory name of the current module
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 // Load environment variables from .env.local
@@ -18,6 +19,10 @@ log('Environment check:', {
     hasOpenAiKey: !!process.env.GEMINI_API_KEY,
     hasFirecrawlKey: !!process.env.FIRECRAWL_API_KEY
 });
+// Create LRU cache for deep-research results
+const deepResearchCache = new LRUCache({
+    max: 20, // Adjust max size as needed
+});
 const server = new McpServer({
     name: "deep-research",
     version: "1.0.0"
@@ -29,46 +34,52 @@ server.tool("deep-research", "Perform deep research on a topic using AI-powered 
     breadth: z.number().min(1).max(5).describe("How broad to make each research level (1-5)"),
     existingLearnings: z.array(z.string()).optional().describe("Optional array of existing research findings to build upon")
 }, async ({ query, depth, breadth, existingLearnings = [] }) => {
+    // 1. Create cache key
+    let cacheKey;
+    try {
+        const keyObject = { query, depth, breadth, existingLearnings };
+        cacheKey = JSON.stringify(keyObject);
+    }
+    catch (keyError) {
+        log("Error creating cache key:", keyError);
+        return { content: [{ type: "text", text: "Error creating cache key" }], isError: true }; // Return an error response
+    }
+    // 2. Check cache
+    try {
+        const cachedResult = deepResearchCache.get(cacheKey);
+        if (cachedResult) {
+            log("Returning cached result for query:", query);
+            return cachedResult;
+        }
+    }
+    catch (cacheGetError) {
+        log("Error getting result from cache:", cacheGetError);
+        // Continue without cache if there's an error
+    }
     try {
         log("Starting research with query:", query);
-        log("Parameters:", { depth, breadth, existingLearningsCount: existingLearnings.length });
-        // Track research progress
-        let currentProgress = "";
         const result = await research({
             query,
-            breadth,
-            depth,
+            depth: depth ?? 3,
+            breadth: breadth ?? 3,
+            existingLearnings: existingLearnings,
             onProgress: (progress) => {
-                const progressMsg = `Depth ${progress.currentDepth}/${progress.totalDepth}, Query ${progress.completedQueries}/${progress.totalQueries}: ${progress.currentQuery || ""}`;
-                if (progressMsg !== currentProgress) {
-                    currentProgress = progressMsg;
-                    log(progressMsg);
-                    // Send progress notification with the text message
-                    server.server.notification({
-                        method: "notifications/progress",
-                        params: {
-                            progressToken: 0,
-                            data: progressMsg
-                        }
-                    })
-                        .catch(error => {
-                        log("Error sending progress notification:", error);
-                    });
-                }
+                // Basic progress logging
+                log(`Progress: ${progress.progressMsg}`);
+                // Send progress notification with the text message
+                // server.server.notification({ //NOTE: server.server is undefined - remove one `.server`
+                //   method: "notifications/progress",
+                //   params: {
+                //     progressToken: 0,
+                //     data: progressMsg
+                //   }
+                // })
+                // .catch(error => {
+                //   log("Error sending progress notification:", error);
+                // });
             }
         });
         log("Research completed, generating report...");
-        // Send final progress update
-        server.server.notification({
-            method: "notifications/progress",
-            params: {
-                progressToken: 0,
-                data: "Research completed, generating report..."
-            }
-        })
-            .catch(error => {
-            log("Error sending final progress notification:", error);
-        });
         // Generate final report
         const report = await writeFinalReport({
             prompt: query,
@@ -76,7 +87,7 @@ server.tool("deep-research", "Perform deep research on a topic using AI-powered 
             visitedUrls: result.visitedUrls
         });
         log("Report generated successfully");
-        return {
+        const finalResult = {
             content: [
                 {
                     type: "text",
@@ -92,6 +103,15 @@ server.tool("deep-research", "Perform deep research on a topic using AI-powered 
                 }
             }
         };
+        // 4. Store result in cache
+        try {
+            deepResearchCache.set(cacheKey, finalResult);
+            log("Stored result in cache for query:", query);
+        }
+        catch (cacheSetError) {
+            log("Error storing result in cache:", cacheSetError);
+        }
+        return finalResult;
     }
     catch (error) {
         log("Error in deep research:", error);
@@ -101,26 +121,20 @@ server.tool("deep-research", "Perform deep research on a topic using AI-powered 
             content: [
                 {
                     type: "text",
-                    text: `Error performing research: ${errorMessage}`
+                    text: `Error during deep research: ${errorMessage}`
                 }
             ],
             isError: true
         };
     }
 });
-async function main() {
-    try {
-        // Start receiving messages on stdin and sending messages on stdout
-        const transport = new StdioServerTransport();
-        await server.connect(transport);
-        log("Deep Research MCP Server running on stdio");
-    }
-    catch (error) {
-        log("Error starting server:", error);
-        process.exit(1);
-    }
-}
-main().catch((error) => {
-    log("Fatal error in main():", error);
-    process.exit(1);
+// Start the MCP server
+const transport = new StdioServerTransport(process.stdin, process.stdout);
+server.connect(transport) // Pass the transport instance to server.connect()
+    .then(() => {
+    log("MCP server running");
+})
+    .catch((err) => {
+    console.error("MCP server error:", err);
+    log("MCP server error:", err);
 });

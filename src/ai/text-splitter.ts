@@ -163,8 +163,8 @@ export class TiktokenTextSplitter extends TextSplitter {
     try {
       this.tokenizer = getEncoding(this.modelName as TiktokenEncoding);
     } catch (e: any) {
-      console.warn(`Failed to load ${this.modelName}, falling back to cl100k_base`);
-      this.tokenizer = getEncoding("cl100k_base");
+      console.warn(`Failed to load ${this.modelName}, falling back to o200k_base`);
+      this.tokenizer = getEncoding("o200k_base");
     }
   }
 

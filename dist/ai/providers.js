@@ -55,9 +55,3 @@ const splitter = new TiktokenTextSplitter({
 const myPrompt = "Your very long prompt here...";
 const trimmedPrompt = trimPrompt(myPrompt, splitter.maxTokens);
 // Now use the trimmedPrompt with your language model
-// Example: Define a placeholder learningPromptTemplate (customize as needed)
-export const learningPromptTemplate = `
-// Your learning prompt template content here
-Summarize the key learnings from the following text:
-{{text}}
-`;

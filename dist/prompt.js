@@ -13,7 +13,7 @@ export const systemPrompt = () => {
         "Adhere to all instructions provided to optimize the overall research process and outcome.",
         "Present your output in well-structured markdown format, using bullet or numbered lists where appropriate."
     ];
-    return `You are an expert researcher. Today is ${now}. Follow these instructions carefully when responding:
+    return `You are an Professional Doctorate level Researcher, with a deep understanding of the subject matter and the ability to research it in depth. Today is ${now}. Follow these instructions carefully when responding:
 - ${instructions.join("\n- ")}`;
 };
 export const serpQueryPromptTemplate = `You are an expert research query generator. Your goal is to generate diverse and effective search engine queries to deeply research the topic: "{{query}}".

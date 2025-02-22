@@ -1,5 +1,6 @@
 import FirecrawlApp, { type SearchResponse } from '@mendable/firecrawl-js';
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { LRUCache } from 'lru-cache';
 import { compact } from 'lodash-es';
 import pLimit from 'p-limit';
 import { z } from 'zod';
@@ -26,7 +27,12 @@ export type ResearchProgress = {
   currentQuery?: string;
   totalQueries: number;
   completedQueries: number;
+  progressMsg?: string;
 };
+
+export interface researchProgress {
+  progressMsg: string;
+}
 
 type ResearchResult = {
   learnings: string[];
@@ -64,6 +70,16 @@ type SerpQuery = { query: string; researchGoal: string; };
 
 const DEFAULT_NUM_QUERIES = 3;
 
+// Create an LRU cache instance
+const serpQueryCache = new LRUCache<string, SerpQuery[]>({
+  max: 50, // Maximum number of items in the cache
+});
+
+// Create LRU cache for final reports
+const reportCache = new LRUCache<string, string>({ // Cache stores report strings
+  max: 20, // Adjust max size as needed
+});
+
 async function generateSerpQueries({
   query: rawQuery,
   numQueries = DEFAULT_NUM_QUERIES,
@@ -82,6 +98,41 @@ async function generateSerpQueries({
   breadth?: number;
 }): Promise<SerpQuery[]> {
   try {
+    // 1. Create a cache key
+    let cacheKey: string;
+    try {
+      const keyObject: any = { rawQuery, numQueries, researchGoal, initialQuery, depth, breadth };
+
+      // Omit default values from the cache key
+      if (numQueries === DEFAULT_NUM_QUERIES) delete keyObject.numQueries;
+      if (researchGoal === "Initial query") delete keyObject.researchGoal;
+      if (initialQuery === rawQuery) delete keyObject.initialQuery; // Assuming initialQuery defaults to rawQuery
+      if (depth === 1) delete keyObject.depth;
+      if (breadth === 1) delete keyObject.breadth;
+
+      // Hash the learnings array (example using a simple hash function)
+      const learningsHash = learnings.length > 0 ? String(learnings.reduce((acc, val) => acc + val.charCodeAt(0), 0)) : '';
+      keyObject.learningsHash = learningsHash;
+
+      cacheKey = JSON.stringify(keyObject);
+    } catch (e) {
+      console.error("Error creating cache key:", e);
+      cacheKey = rawQuery; // Fallback to a simple key
+    }
+
+    // 2. Check if the result is in the cache
+    try {
+      const cachedResult = serpQueryCache.get(cacheKey);
+      if (cachedResult) {
+        log(`Returning cached SERP queries for key: ${cacheKey}`);
+        return cachedResult;
+      }
+    } catch (e) {
+      console.error("Error getting from cache:", e);
+    }
+
+    log(`Generating SERP queries for key: ${cacheKey}`);
+
     const query = escape(rawQuery);
     const sanitizedLearnings = learnings?.map(escape);
 
@@ -108,30 +159,27 @@ async function generateSerpQueries({
     const parsedResult = z.object({
       queries: z.array(z.object({
         query: z.string(),
-        researchGoal: z.string().default("General research"),
+        researchGoal: z.string(),
       })),
-    }).safeParse(JSON.parse(geminiResult.response.text()));
+    });
 
-    if (!parsedResult.success) {
-      log('Failed to parse SERP queries:', parsedResult.error);
-      log(`Failed prompt: ${finalPrompt}`);
-      return [];
-    }
-
-    const res = parsedResult.data;
-    log('Created queries:', res.queries);
-
+    const res = parsedResult.parse(JSON.parse(geminiResult.response.text()));
     const uniqueQueries = Array.from(new Set(res.queries.map(q => q.query))).map(q => res.queries.find(query => query.query === q)!);
+
+    // 4. Store the result in the cache
+    try {
+      serpQueryCache.set(cacheKey, uniqueQueries);
+      log(`Cached SERP queries for key: ${cacheKey}`);
+    } catch (e) {
+      console.error("Error setting to cache:", e);
+    }
 
     return uniqueQueries.slice(0, numQueries);
 
   } catch (error) {
-    if (error instanceof Error) {
-      log(`Error in generateSerpQueries: ${error.message}`, { stack: error.stack });
-    } else {
-      log(`Error in generateSerpQueries: An unknown error occurred`, { error });
-    }
-    return [];
+    console.error("Error in generateSerpQueries:", error);
+    // Consider a more specific error message
+    throw new Error(`Failed to generate SERP queries: ${error}`);
   }
 }
 
@@ -427,6 +475,32 @@ export async function writeFinalReport({
   learnings,
   visitedUrls,
 }: WriteFinalReportParams): Promise<string> {
+  // 1. Create cache key
+  let cacheKey: string;
+  try {
+    const keyObject: any = { prompt };
+    const learningsHash = learnings.length > 0 ? String(learnings.reduce((acc, val) => acc + val.charCodeAt(0), 0)) : ''; // Hash learnings
+    keyObject.learningsHash = learningsHash;
+    const visitedUrlsHash = visitedUrls.length > 0 ? String(visitedUrls.reduce((acc, val) => acc + val.charCodeAt(0), 0)) : ''; // Hash visitedUrls (optional)
+    keyObject.visitedUrlsHash = visitedUrlsHash; // Include visitedUrls hash in key (optional)
+    cacheKey = JSON.stringify(keyObject);
+  } catch (keyError) {
+    console.error("Error creating report cache key:", keyError);
+    cacheKey = 'default-report-key'; // Fallback key
+  }
+
+  // 2. Check cache
+  try {
+    const cachedReport = reportCache.get(cacheKey);
+    if (cachedReport) {
+      log(`Returning cached report for key: ${cacheKey}`);
+      return cachedReport;
+    }
+  } catch (cacheGetError) {
+    console.error("Error getting report from cache:", cacheGetError);
+    // Continue without cache if error
+  }
+
   log("Generating outline...");
   const outline = await generateOutline(prompt, learnings);
   log("Outline generated:", outline);
@@ -463,20 +537,34 @@ ${visitedUrls.map(url => `- ${url}`).join('\n')}
 `;
 
   log("Final report generated.");
+
+  // 3. Store report in cache
+  try {
+    reportCache.set(cacheKey, finalReport);
+    log(`Cached report for key: ${cacheKey}`);
+  } catch (cacheSetError) {
+    console.error("Error setting report to cache:", cacheSetError);
+  }
+
   return finalReport;
 }
 
-export async function research(
-  { query, breadth, depth, onProgress }: {
-    query: string;
-    breadth: number;
-    depth: number;
-    onProgress?: (progress: ResearchProgress) => void; // Make onProgress optional
-  }
-): Promise<{ learnings: string[]; visitedUrls: string[]; }> {
+export async function research({
+  query,
+  depth = 3,
+  breadth = 3,
+  existingLearnings = [],
+  onProgress
+}: ResearchOptions): Promise<ResearchResult> {
   log(`Starting research for query: ${query}`);
 
-  const researchResult = await deepResearch({ query, breadth, depth, onProgress });
+  const researchResult = await deepResearch({
+    query,
+    depth,
+    breadth,
+    learnings: existingLearnings,
+    onProgress
+  });
   log("Deep research completed. Generating final report...");
 
   const finalReport = await writeFinalReport({
@@ -487,5 +575,13 @@ export async function research(
   log("Final report written. Research complete.");
 
   return researchResult;
+}
+
+export interface ResearchOptions {
+    query: string;
+    depth: number;
+    breadth: number;
+    existingLearnings?: string[];
+    onProgress?: (progress: ResearchProgress) => void;
 }
 
