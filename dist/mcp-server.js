@@ -19,9 +19,9 @@ log('Environment check:', {
     hasOpenAiKey: !!process.env.GEMINI_API_KEY,
     hasFirecrawlKey: !!process.env.FIRECRAWL_API_KEY
 });
-// Create LRU cache for deep-research results
+// Update cache definition
 const deepResearchCache = new LRUCache({
-    max: 20, // Adjust max size as needed
+    max: 20,
 });
 const server = new McpServer({
     name: "deep-research",

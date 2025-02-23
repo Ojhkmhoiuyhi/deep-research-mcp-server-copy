@@ -1,3 +1,4 @@
+import { writeFileSync } from 'fs';
 export class OutputManager {
     progressLines = 4;
     progressArea = [];
@@ -70,5 +71,15 @@ export class OutputManager {
         process.stdout.write(this.progressArea.join('\n'));
         // Restore cursor position
         process.stdout.write('\x1b[u');
+    }
+    saveResearchReport(reportContent) {
+        const filename = 'output.md';
+        try {
+            writeFileSync(filename, reportContent);
+            this.log(`Final report saved to ${filename}`);
+        }
+        catch (error) {
+            this.log(`Error saving report to ${filename}:`, error);
+        }
     }
 }

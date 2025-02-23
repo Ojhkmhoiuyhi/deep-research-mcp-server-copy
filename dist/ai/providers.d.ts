@@ -1,7 +1,12 @@
-export declare const o3MiniModel: import("@google/generative-ai").GenerativeModel;
-export declare const o3MiniModel2: import("@google/generative-ai").GenerativeModel;
-export declare const o3MiniModel3: import("@google/generative-ai").GenerativeModel;
-export declare function trimPrompt(prompt: string, maxTokens: number): string;
+import { type GenerativeModel } from "@google/generative-ai";
+export declare const embeddingModel: GenerativeModel;
+export declare const flashModel: GenerativeModel;
+export declare const researchModel: GenerativeModel;
+export declare const o3MiniModel: GenerativeModel;
+export declare const o3MiniModel2: GenerativeModel;
+export declare const o3MiniModel3: GenerativeModel;
+export declare const o3MiniModel4: GenerativeModel;
+export declare function trimPrompt(prompt: string, maxTokens: number): Promise<string>;
 export declare function createPrompt(template: string, variables: Record<string, string>): string;
 /**
  * Generates a text embedding using the Gemini API 'text-embedding-004' model.
@@ -12,4 +17,14 @@ export declare function createPrompt(template: string, variables: Record<string,
  */
 export declare function generateTextEmbedding(text: string): Promise<number[] | null>;
 export declare function callGeminiProConfigurable(prompt: string, modelName?: string, temperature?: number, safetySettings?: any): Promise<string>;
+export type ResearchResult = {
+    learnings: string[];
+    visitedUrls: string[];
+};
+export declare function semanticChunking(text: string, model?: string): Promise<string[]>;
+export declare function adaptivePrompt(basePrompt: string, context: string[], similarityThreshold?: number): Promise<string>;
+export declare class SemanticTextSplitter {
+    splitText(text: string): Promise<string[]>;
+    private calculateSemanticChunks;
+}
 //# sourceMappingURL=providers.d.ts.map

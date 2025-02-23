@@ -1,12 +1,11 @@
 import { Tiktoken, getEncoding, TiktokenEncoding } from "js-tiktoken";
+import { embeddingModel } from './providers.js';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
-interface TextSplitterParams {
+export interface TextSplitterParams {
   chunkSize: number;
-
   chunkOverlap: number;
-
   modelName?: string;
-
   maxTokens?: number;
 }
 
@@ -14,11 +13,12 @@ interface TiktokenTextSplitterParams extends TextSplitterParams {
   contextLength?: number;
 }
 
-// Define a configuration object for model-specific settings
+// Update model configuration for Gemini embeddings
 const modelConfig: { [modelName: string]: { maxTokens: number } } = {
-  "o200k_base": { maxTokens: 8192 },
-  "cl100k_base": { maxTokens: 8192 }, // Add cl100k_base config
-  // Add more models and their maxTokens values here
+  "text-embedding-004": { maxTokens: 3072 }, // Gemini text-embedding model
+  "multimodal-embedding-001": { maxTokens: 2048 }, // Multimodal embedding
+  // Default to latest Gemini embedding model
+  "default": { maxTokens: 3072 }
 };
 
 abstract class TextSplitter implements TextSplitterParams {
@@ -26,6 +26,7 @@ abstract class TextSplitter implements TextSplitterParams {
   chunkOverlap = 100;
   modelName: string = "o200k_base";
   maxTokens: number; //  Remove default value
+  protected abstract tokenizer: Tiktoken;  // Add abstract declaration
 
   constructor(fields?: Partial<TextSplitterParams>) {
     this.chunkSize = fields?.chunkSize ?? this.chunkSize;
@@ -64,46 +65,47 @@ abstract class TextSplitter implements TextSplitterParams {
     return text === '' ? null : text;
   }
 
-  mergeSplits(splits: string[], separator: string): string[] {
+  // Update mergeSplits to use async token counting
+  async mergeSplits(splits: string[], separator: string): Promise<string[]> {
     const docs: string[] = [];
-    const currentDoc: string[] = [];
+    let currentDoc: string[] = [];
     let total = 0;
+
     for (const d of splits) {
-      const _len = d.length;
+      const _len = await this.getTokenCount(d);
+
       if (total + _len >= this.chunkSize) {
-        if (total > this.chunkSize) {
-          console.warn(
-            `Created a chunk of size ${total}, +
-which is longer than the specified ${this.chunkSize}`,
-          );
-        }
         if (currentDoc.length > 0) {
           const doc = this.joinDocs(currentDoc, separator);
-          if (doc !== null) {
-            docs.push(doc);
-          }
-          // Keep on popping if:
-          // - we have a larger chunk than in the chunk overlap
-          // - or if we still have any chunks and the length is long
-          while (
-            total > this.chunkOverlap ||
-            (total + _len > this.chunkSize && total > 0)
-          ) {
+          if (doc) docs.push(doc);
+          
+          while (total > this.chunkOverlap) {
             if (currentDoc[0]) {
-              total -= currentDoc[0].length;
+              total -= await this.getTokenCount(currentDoc[0]);
             }
             currentDoc.shift();
           }
         }
       }
+      
       currentDoc.push(d);
       total += _len;
     }
-    const doc = this.joinDocs(currentDoc, separator);
-    if (doc !== null) {
-      docs.push(doc);
-    }
+
+    const finalDoc = this.joinDocs(currentDoc, separator);
+    if (finalDoc) docs.push(finalDoc);
+    
     return docs;
+  }
+
+  async getTokenCount(text: string): Promise<number> {
+    try {
+      const result = await embeddingModel.countTokens(text);
+      return result.totalTokens;
+    } catch (error) {
+      console.error('Gemini token count failed, using fallback:', error);
+      return text.split(/\s+/).length;
+    }
   }
 }
 
@@ -117,6 +119,10 @@ export class RecursiveCharacterTextSplitter
   implements RecursiveCharacterTextSplitterParams
 {
   separators: string[] = ["\n\n", "\n", " ", ""];
+  protected tokenizer = {
+    encode: (text: string) => [], // Dummy implementation
+    decode: (tokens: number[]) => "" 
+  };
 
   constructor(fields?: Partial<TextSplitterParams> & { separators?: string[] }) {
     super(fields);
@@ -151,20 +157,35 @@ export class RecursiveCharacterTextSplitter
 
     return splits;
   }
+
+  async getTokenCount(text: string): Promise<number> {
+    try {
+      const result = await embeddingModel.countTokens(text);
+      return result.totalTokens;
+    } catch (error) {
+      console.error('Gemini token count failed, using fallback:', error);
+      return text.split(/\s+/).length;
+    }
+  }
 }
 
 export class TiktokenTextSplitter extends TextSplitter {
-  private tokenizer: Tiktoken;
-  private contextLength: number;
+  protected tokenizer = { 
+    encode: (text: string) => [], // Formal implementation only
+    decode: (tokens: number[]) => ""
+  };
 
   constructor(fields?: Partial<TiktokenTextSplitterParams>) {
     super(fields);
-    this.contextLength = fields?.contextLength ?? 0;
+  }
+
+  async getTokenCount(text: string): Promise<number> {
     try {
-      this.tokenizer = getEncoding(this.modelName as TiktokenEncoding);
-    } catch (e: any) {
-      console.warn(`Failed to load ${this.modelName}, falling back to o200k_base`);
-      this.tokenizer = getEncoding("o200k_base");
+      const result = await embeddingModel.countTokens(text);
+      return result.totalTokens;
+    } catch (error) {
+      console.error('Gemini token count failed, using fallback:', error);
+      return text.split(/\s+/).length;
     }
   }
 
@@ -201,6 +222,38 @@ export class TiktokenTextSplitter extends TextSplitter {
     }
 
     return finalChunks;
+  }
+}
+
+export class SemanticTextSplitter {
+  private readonly chunkSize: number;
+  private readonly chunkOverlap: number;
+
+  constructor({ chunkSize = 2000, chunkOverlap = 200 }: {
+    chunkSize?: number;
+    chunkOverlap?: number;
+  } = {}) {
+    this.chunkSize = chunkSize;
+    this.chunkOverlap = chunkOverlap;
+  }
+
+  async splitText(text: string): Promise<string[]> {
+    const embedding = await embeddingModel.embedContent(text);
+    const vector = embedding.embedding.values;
+    
+    return this.calculateSemanticChunks(text, vector);
+  }
+
+  private calculateSemanticChunks(text: string, vector: number[]): string[] {
+    const chunkLength = Math.floor(text.length / (vector.length / this.chunkSize));
+    const chunks: string[] = [];
+    
+    for (let i = 0; i < text.length; i += chunkLength - this.chunkOverlap) {
+      const end = Math.min(i + chunkLength, text.length);
+      chunks.push(text.substring(i, end));
+    }
+    
+    return chunks;
   }
 }
 

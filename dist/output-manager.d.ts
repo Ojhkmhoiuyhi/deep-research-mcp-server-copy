@@ -9,5 +9,6 @@ export declare class OutputManager {
     updateProgress(progress: ResearchProgress): void;
     private getProgressBar;
     private drawProgress;
+    saveResearchReport(reportContent: string): void;
 }
 //# sourceMappingURL=output-manager.d.ts.map

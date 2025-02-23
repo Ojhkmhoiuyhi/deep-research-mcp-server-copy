@@ -27,8 +27,8 @@ log('Environment check:', {
   hasFirecrawlKey: !!process.env.FIRECRAWL_API_KEY
 });
 
-// Define the structure for the cache
-interface ResearchResult {
+// Change the interface name in mcp-server.ts to avoid conflict
+interface MCPResearchResult {
     content: { type: "text"; text: string; }[];
     metadata: {
         learnings: string[];
@@ -38,12 +38,12 @@ interface ResearchResult {
             totalSources: number;
         };
     };
-    [key: string]: any; // Add index signature
+    [key: string]: any;
 }
 
-// Create LRU cache for deep-research results
-const deepResearchCache = new LRUCache<string, ResearchResult>({
-  max: 20, // Adjust max size as needed
+// Update cache definition
+const deepResearchCache = new LRUCache<string, MCPResearchResult>({
+  max: 20,
 });
 
 const server = new McpServer({
@@ -61,7 +61,7 @@ server.tool(
     breadth: z.number().min(1).max(5).describe("How broad to make each research level (1-5)"),
     existingLearnings: z.array(z.string()).optional().describe("Optional array of existing research findings to build upon")
   },
-  async ({ query, depth, breadth, existingLearnings = [] }): Promise<ResearchResult | { content: { type: "text"; text: string; }[]; isError: boolean; }> => {
+  async ({ query, depth, breadth, existingLearnings = [] }): Promise<MCPResearchResult | { content: { type: "text"; text: string; }[]; isError: boolean; }> => {
     // 1. Create cache key
     let cacheKey: string;
     try {
@@ -120,7 +120,7 @@ server.tool(
 
       log("Report generated successfully");
 
-      const finalResult: ResearchResult = {
+      const finalResult: MCPResearchResult = {
         content: [
           {
             type: "text",

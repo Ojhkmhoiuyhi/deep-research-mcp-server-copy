@@ -7,11 +7,18 @@
 node_modules
 .pnp
 .pnp.js
-
+.dist
+dist
+dist/
+dist/*
+dist/**/*
+dist/**/**/*
+docs-cursorrrules
 # Local env files
 
 # Testing
 coverage
+
 
 # Turbo
 .turbo
@@ -34,3 +41,6 @@ yarn-error.log*
 bun.lockb
 .env
 .env.local
+dist/deep-research.d.ts
+dist/deep-research.d.ts.map
+dist/deep-research.js
