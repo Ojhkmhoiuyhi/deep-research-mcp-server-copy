@@ -1,11 +1,14 @@
 import type { ResearchProgress } from './deep-research.js';
 import { writeFileSync } from 'fs';
+import { generateProgressBar, TERMINAL_CONTROLS } from './terminal-utils.js';
 
 export class OutputManager {
   private progressLines = 4;
   private progressArea: string[] = [];
   private initialized = false;
   private lastLogMessage = ''; // Store the last log message
+  private logQueue: string[] = [];
+  private logTimer?: NodeJS.Timeout;
   
   constructor() {
     // Initialize terminal
@@ -18,29 +21,43 @@ export class OutputManager {
     }
   }
   
-  log(...args: any[]) {
-    if (!this.initialized) {
-      console.log(...args);
-      return;
+  private formatLogEntry(message: string, metadata?: Record<string, unknown>): string {
+    const timestamp = new Date().toISOString();
+    const metaStr = metadata ? JSON.stringify(metadata) : '';
+    return `[${timestamp}] ${message} ${metaStr}`;
+  }
+
+  log(message: string, metadata?: Record<string, unknown>) {
+    this.enqueueLog(this.formatLogEntry(message, metadata));
+    this.scheduleFlush();
+  }
+
+  private enqueueLog(entry: string) {
+    this.logQueue.push(entry);
+    if (this.logQueue.length > 100) {
+      this.flushLogs(); // Prevent memory leaks
     }
+  }
 
-    // Save cursor position
-    process.stdout.write('\x1b[s');
+  private scheduleFlush() {
+    if (!this.logTimer) {
+      this.logTimer = setTimeout(() => this.flushLogs(), 50);
+    }
+  }
 
-    // Move cursor up to progress area
-    process.stdout.write(`\x1B[${this.progressLines}A`);
-    // Clear progress area
-    process.stdout.write('\x1B[0J');
+  private flushLogs() {
+    try {
+      process.stdout.write(TERMINAL_CONTROLS.savePos);
+      process.stdout.write(this.logQueue.join('\n') + '\n');
+      this.logQueue = [];
+    } finally {
+      if (this.logTimer) clearTimeout(this.logTimer);
+      process.stdout.write(TERMINAL_CONTROLS.restorePos);
+    }
+  }
 
-    // Print log message
-    this.lastLogMessage = args.join(' '); // Store the log message
-    console.log(...args);
-
-    // Restore cursor position
-    process.stdout.write('\x1b[u');
-
-    // Redraw progress area if initialized
-    this.drawProgress();
+  static logCacheEviction(value: unknown) {
+    console.log(`Cache evicted: ${JSON.stringify(value)}`);
   }
   
   updateProgress(progress: ResearchProgress) {
@@ -95,7 +112,7 @@ export class OutputManager {
       writeFileSync(filename, reportContent);
       this.log(`Final report saved to ${filename}`);
     } catch (error) {
-      this.log(`Error saving report to ${filename}:`, error);
+      this.log(`Error saving report to ${filename}:`, { error: error instanceof Error ? error.message : String(error) });
     }
   }
 }

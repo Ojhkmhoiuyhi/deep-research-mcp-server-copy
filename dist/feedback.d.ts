@@ -8,16 +8,19 @@ interface FeedbackOptions {
     existingLearnings?: string[];
 }
 declare const FeedbackResponseSchema: z.ZodObject<{
-    followUpQuestions: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
-    analysis: z.ZodOptional<z.ZodString>;
-}, "strip", z.ZodTypeAny, {
-    followUpQuestions?: string[] | undefined;
-    analysis?: string | undefined;
-}, {
-    followUpQuestions?: string[] | undefined;
-    analysis?: string | undefined;
-}>;
-type FeedbackResponse = z.infer<typeof FeedbackResponseSchema>;
+    followUpQuestions: z.ZodArray<z.ZodString, "many">;
+    analysis: z.ZodString;
+    confidenceScore: z.ZodOptional<z.ZodNumber>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    followUpQuestions: z.ZodArray<z.ZodString, "many">;
+    analysis: z.ZodString;
+    confidenceScore: z.ZodOptional<z.ZodNumber>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    followUpQuestions: z.ZodArray<z.ZodString, "many">;
+    analysis: z.ZodString;
+    confidenceScore: z.ZodOptional<z.ZodNumber>;
+}, z.ZodTypeAny, "passthrough">>;
+export type FeedbackResponse = z.infer<typeof FeedbackResponseSchema>;
 export declare function generateFeedback({ query, numQuestions, researchGoal, depth, breadth, existingLearnings, }: FeedbackOptions): Promise<FeedbackResponse>;
 export {};
 //# sourceMappingURL=feedback.d.ts.map

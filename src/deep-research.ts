@@ -1,12 +1,19 @@
 import { z } from 'zod';
-import FirecrawlApp, { type SearchResponse } from '@mendable/firecrawl-js';
+import FirecrawlApp, { type SearchResponse as FirecrawlSearchResponse } from '@mendable/firecrawl-js';
 import { LRUCache } from 'lru-cache';
 import { compact } from 'lodash-es';
 import pLimit from 'p-limit';
-import pkg from 'lodash';
+import pkg, { result } from 'lodash';
 const { escape } = pkg;
 
-import { trimPrompt, o3MiniModel, o3MiniModel2, callGeminiProConfigurable, generateTextEmbedding } from './ai/providers.js';
+import { 
+  type ResearchResultOutput,
+  trimPrompt,
+  o3MiniModel,
+  o3MiniModel2,
+  callGeminiProConfigurable,
+  generateTextEmbedding 
+} from './ai/providers.js';
 import { systemPrompt, serpQueryPromptTemplate, learningPromptTemplate, generateGeminiPrompt } from './prompt.js';
 import { RecursiveCharacterTextSplitter } from './ai/text-splitter.js';
 import { error } from 'node:console';
@@ -18,17 +25,34 @@ import { SemanticTextSplitter } from './ai/text-splitter.js';
 
 const output = new OutputManager();
 
-export interface ProcessResult {
+
+// Rename your local type to avoid conflict
+export interface ResearchResult {
+  content: string;
+  sources: string[];
+  methodology: string;
+  limitations: string;
+  citations: any[];
   learnings: string[];
   visitedUrls: string[];
-  content?: string;
-  sources?: string[];
-  methodology?: string;
-  limitations?: string;
-  citations?: any[];
+  firecrawlResults: SearchResponse; // Use actual Firecrawl type
+  analysis: string;
+}
+
+export interface ProcessResult {
+  analysis: string;
+  content: string;
+  sources: string[];
+  methodology: string;
+  limitations: string;
+  citations: string[];
+  learnings: string[];
+  visitedUrls: string[];
+  firecrawlResults: SearchResponse;
 }
 
 export interface ResearchProgress {
+  [key: string]: unknown; // Add index signature
   currentQuery?: string;
   currentDepth: number;
   totalDepth: number;
@@ -82,18 +106,17 @@ const serpQueryCache = new LRUCache<string, SerpQuery[]>({
 });
 
 // Create LRU cache for final reports
-const reportCache = new LRUCache<string, string>({ // Cache stores report strings
+const reportCache = new LRUCache<string, { __returned: string; __abortController: AbortController; __staleWhileFetching: undefined }>({ // Cache stores report strings
   max: 20, // Adjust max size as needed
 });
 
 function logResearchProgress(progressData: ResearchProgress) {
-  const prettyProgressJson = stringifyJSON(progressData, true); // Pretty print for logs
-
-  if (prettyProgressJson) {
-    output.log("Research Progress Update:\n", prettyProgressJson); // Log pretty JSON
-  } else {
-    output.log("Error stringifying research progress data for logging.");
-    output.log("Raw progress data:", progressData); // Fallback to raw object if stringify fails
+  try {
+    const prettyJson = JSON.stringify(progressData, null, 2);
+    output.log("Progress:", JSON.parse(prettyJson)); // Parse before logging
+  } catch (e) {
+    output.log("Log error:", { error: e instanceof Error ? e.message: String(e) });
+    output.log("Raw data:", { data: progressData });
   }
 }
 
@@ -145,7 +168,7 @@ async function generateSerpQueries({
 
       cacheKey = JSON.stringify(keyObject);
     } catch (e) {
-      output.log("Error creating cache key:", e);
+      output.log("Error creating cache key:", { error: e instanceof Error ? e.message : 'Unknown error' });
       cacheKey = rawQuery; // Fallback to a simple key
     }
 
@@ -153,11 +176,11 @@ async function generateSerpQueries({
     try {
       const cachedResult = serpQueryCache.get(cacheKey);
       if (cachedResult) {
-        output.log(`Returning cached SERP queries for key: ${cacheKey}`);
+        output.log("Cache hit:", { key: cacheKey });
         return cachedResult;
       }
     } catch (e) {
-      output.log("Error getting from cache:", e);
+      output.log("Cache error:", { error: e instanceof Error ? e.message : 'Unknown cache error' });
     }
 
     output.log(`Generating SERP queries for key: ${cacheKey}`);
@@ -187,9 +210,9 @@ async function generateSerpQueries({
 
     try {
       geminiResult = await o3MiniModel.generateContent(finalPrompt);
-      output.log('geminiResult:', JSON.stringify(geminiResult, null, 2));
+      output.log('Gemini response:', { response: JSON.parse(JSON.stringify(geminiResult)) });
 
-      const geminiText = geminiResult.response?.candidates?.[0]?.content?.parts?.[0]?.text;
+      const geminiText = geminiResult.response?.candidates?.[0]?.content?.parts?.[0]?.text || '';
       if (typeof geminiText === 'string') {
         jsonString = geminiText;
       } else {
@@ -197,8 +220,7 @@ async function generateSerpQueries({
         jsonString = '{}';
       }
     } catch (error) {
-      output.log("Error: Unexpected structure in Gemini response - cannot access text.");
-      output.log("Gemini response:", geminiResult);
+      output.log("Gemini error:", { error: error instanceof Error ? error.message : 'Unknown error' });
       jsonString = '{}';
     }
 
@@ -225,17 +247,27 @@ async function generateSerpQueries({
       serpQueryCache.set(cacheKey, serpQueries);
       output.log(`Cached SERP queries for key: ${cacheKey}`);
     } catch (e) {
-      output.log("Error setting to cache:", e);
+      output.log("Error setting to cache:", { error: e instanceof Error ? e.message : 'Unknown error' });
     }
 
     return serpQueries;
 
   } catch (error) {
-    output.log("Error in generateSerpQueries:", error);
+    output.log("Error in generateSerpQueries:", { error: error instanceof Error ? error.message : 'Unknown error' });
     return []; // Return an empty array in case of any error during query generation
   }
 }
 
+// Update splitter initialization to use provider configuration
+const createResearchSplitter = () => {
+  return new RecursiveCharacterTextSplitter({
+    chunkSize: 140,
+    chunkOverlap: 20,
+    separators: ['\n\n', '\n', ' ']
+  });
+};
+
+// Update processSerpResult to use provider-sanctioned splitter
 async function processSerpResult({
   query,
   result,
@@ -245,19 +277,25 @@ async function processSerpResult({
   result: SearchResponse;
   numLearnings?: number;
 }): Promise<{ learnings: string[]; followUpQuestions: string[]; }> {
-  const contents = compact(result.data.map(item => item.markdown)).map(
-    content => content,
-  );
+  const contents = compact(result.data.map(item => 
+    (item as any).markdown // Type assertion for compatibility
+  ));
   const resolvedContents = await Promise.all(contents);
 
   const urls = compact(result.data.map(item => item.url));
-  output.log(`Ran ${query}, found ${contents.length} contents and ${urls.length} URLs:`, urls);
+  output.log(`Ran ${query}, found ${contents.length} contents and ${urls.length} URLs:`, { urls });
 
-  // Initialize the RecursiveCharacterTextSplitter with a context-aware chunk size
-  const splitter = new RecursiveCharacterTextSplitter({ chunkSize: 140 });
+  // Use provider-approved text splitter
+  const splitter = createResearchSplitter();
+  let chunks: string[] = [];
 
-  // Split the contents into smaller chunks
-  const chunks = resolvedContents.flatMap((content) => splitter.splitText(content));
+  // Add proper error handling for splitter failures
+  try {
+    chunks = await splitter.splitText(resolvedContents.join("\n\n"));
+  } catch (error) {
+    output.log(`Text splitting failed: ${error}`);
+    return { learnings: [], followUpQuestions: [] };
+  }
 
   // Process each chunk with the LLM
   const learnings: string[] = [];
@@ -265,7 +303,7 @@ async function processSerpResult({
   for (const chunk of chunks) {
     const prompt = learningPromptTemplate
       .replace("{{query}}", query)
-      .replace("{{title}}", result.data[0]?.title || "No Title")
+      .replace("{{title}}", (result.data[0] as any)?.title || "No Title")
       .replace("{{url}}", result.data[0]?.url || "No URL")
       .replace("{{content}}", chunk);
 
@@ -293,7 +331,7 @@ async function generateOutline(prompt: string, learnings: string[]): Promise<str
     const outlineText = await outlineResponse.response.text();
     return outlineText;
   } catch (error) {
-    output.log('Error in generateOutline:', error);
+    output.log('Error in generateOutline:', { error });
     return 'Outline could not be generated.';
   }
 }
@@ -310,7 +348,7 @@ async function writeReportFromOutline(outline: string, learnings: string[]): Pro
     const reportText = await reportResponse.response.text();
     return reportText;
   } catch (error) {
-    output.log('Error in writeReportFromOutline:', error);
+    output.log('Error in writeReportFromOutline:', { error });
     return 'Report could not be generated.';
   }
 }
@@ -323,7 +361,7 @@ async function generateSummary(learnings: string[]): Promise<string> {
     const summaryText = await summaryResponse.response.text();
     return summaryText;
   } catch (error) {
-    output.log('Error in generateSummary:', error);
+    output.log('Error in generateSummary:', { error });
     return 'Summary could not be generated.';
   }
 }
@@ -336,7 +374,7 @@ async function generateTitle(prompt: string, learnings: string[]): Promise<strin
     const titleText = await titleResponse.response.text();
     return titleText;
   } catch (error) {
-    output.log('Error in generateTitle:', error);
+    output.log('Error in generateTitle:', { error });
     return 'Title could not be generated.';
   }
 }
@@ -384,12 +422,12 @@ async function deepResearch({
 
   if (depth <= 0) {
     output.log("Reached research depth limit.");
-    return { content: '', sources: [], methodology: '', limitations: '', citations: [], learnings: [], visitedUrls: [] };
+    return { content: '', sources: [], methodology: '', limitations: '', citations: [], learnings: [], visitedUrls: [], firecrawlResults: { metadata: {} } as SearchResponse, analysis: '' };
   }
 
   if (visitedUrls.length > 20) {
     output.log("Reached visited URLs limit.");
-    return { content: '', sources: [], methodology: '', limitations: '', citations: [], learnings: [], visitedUrls: [] };
+    return { content: '', sources: [], methodology: '', limitations: '', citations: [], learnings: [], visitedUrls: [], firecrawlResults: { metadata: {} } as SearchResponse, analysis: '' };
   }
 
   const serpQueries = await generateSerpQueries({
@@ -421,8 +459,15 @@ async function deepResearch({
       if (visitedUrls.includes(serpQuery.query)) {
         output.log(`Already visited URL for query: ${serpQuery.query}, skipping.`);
         return {
+          analysis: '',
+          content: '',
+          sources: [],
+          methodology: '',
+          limitations: '',
+          citations: [],
           learnings: [],
           visitedUrls: [],
+          firecrawlResults: { metadata: {} } as SearchResponse
         }; // Return empty result to avoid affecting overall learnings
       }
 
@@ -443,8 +488,15 @@ async function deepResearch({
         if (!firecrawlResult || !firecrawlResult.data) {
           output.log(`Invalid Firecrawl result for query: ${serpQuery.query}`);
           return {
+            analysis: '',
+            content: '',
+            sources: [],
+            methodology: '',
+            limitations: '',
+            citations: [],
             learnings: [],
             visitedUrls: [],
+            firecrawlResults: { metadata: {} } as SearchResponse
           };
         }
 
@@ -456,7 +508,8 @@ async function deepResearch({
         output.log("Researching deeper...");
         const processResult = await processSerpResult({
           query: serpQuery.query,
-          result,
+          result: { ...result, metadata: { success: true, error: '' } } as SearchResponse,
+          numLearnings: 3,
         });
         const newLearnings = processResult?.learnings ?? []; // Assign here to pre-declared variable
         const allLearnings = [...learnings, ...newLearnings];
@@ -502,25 +555,29 @@ async function deepResearch({
         } else {
           output.log("Reached maximum research depth.");
           return {
+            analysis: geminiResult.analysis || 'No analysis available',
             content: newLearnings.join('\n\n'),
             sources: [],
             methodology: 'Semantic chunking with Gemini Flash 2.0',
             limitations: 'Current implementation focuses on text analysis only',
             citations: [],
             learnings: newLearnings,
-            visitedUrls: newUrls
+            visitedUrls: newUrls,
+            firecrawlResults: { metadata: { success: false, error: 'No metadata' }, ...result } as unknown as SearchResponse,
           };
         }
       } catch (error) {
         output.log(`Error processing query ${serpQuery.query}: ${error}`);
         return {
+          analysis: '',
           content: '',
           sources: [],
           methodology: '',
           limitations: '',
           citations: [],
           learnings: [],
-          visitedUrls: []
+          visitedUrls: [],
+          firecrawlResults: { metadata: {} } as SearchResponse
         };
       } finally {
         progress.completedQueries += 1; // Increment completed queries count
@@ -531,13 +588,15 @@ async function deepResearch({
     } catch (error) {
       output.log(`Error processing query ${serpQuery.query}: ${error}`);
       return {
+        analysis: '',
         content: '',
         sources: [],
         methodology: '',
         limitations: '',
         citations: [],
         learnings: [],
-        visitedUrls: []
+        visitedUrls: [],
+        firecrawlResults: { metadata: {} } as SearchResponse
       };
     }
   };
@@ -549,14 +608,24 @@ async function deepResearch({
   visitedUrls = compact(results.flatMap((result: ProcessResult) => result?.visitedUrls));
   learnings = compact(results.flatMap((result: ProcessResult) => result?.learnings));
 
-  return {
+  const processedData = {
+    analysis: '',
     content: learnings.join('\n\n'),
     sources: [],
     methodology: 'Semantic chunking with Gemini Flash 2.0',
     limitations: 'Current implementation focuses on text analysis only',
     citations: [],
     learnings: learnings,
-    visitedUrls: visitedUrls
+    visitedUrls: visitedUrls,
+    firecrawlResults: { metadata: {}, ...result } as SearchResponse,
+  };
+
+  // Process Firecrawl results into the report
+  const firecrawlResponse = await firecrawl.search(query);
+  
+  return {
+    ...processedData,
+    firecrawlResults: { metadata: { success: false, error: 'No metadata' }, ...firecrawlResponse } as unknown as SearchResponse,
   };
 }
 
@@ -581,7 +650,7 @@ export async function writeFinalReport({
     keyObject.visitedUrlsHash = visitedUrlsHash; // Include visitedUrls hash in key (optional)
     cacheKey = JSON.stringify(keyObject);
   } catch (keyError) {
-    output.log("Error creating report cache key:", keyError);
+    output.log("Error creating report cache key:", { error: keyError instanceof Error ? keyError.message : 'Unknown error' });
     cacheKey = 'default-report-key'; // Fallback key
   }
 
@@ -590,16 +659,16 @@ export async function writeFinalReport({
     const cachedReport = reportCache.get(cacheKey);
     if (cachedReport) {
       output.log(`Returning cached report for key: ${cacheKey}`);
-      return cachedReport;
+      return cachedReport.__returned;
     }
   } catch (cacheGetError) {
-    output.log("Error getting report from cache:", cacheGetError);
+    output.log("Error getting report from cache:", { error: cacheGetError instanceof Error ? cacheGetError.message : 'Unknown error' });
     // Continue without cache if error
   }
 
   output.log("Generating outline...");
   const outline = await generateOutline(prompt, learnings);
-  output.log("Outline generated:", outline);
+  output.log("Outline generated:", { outline });
 
   output.log("Writing report from outline...");
   const report = await writeReportFromOutline(outline, learnings);
@@ -611,7 +680,7 @@ export async function writeFinalReport({
 
   output.log("Generating title...");
   const title = await generateTitle(prompt, learnings);
-  output.log("Title generated:", title);
+  output.log("Title generated:", { title });
 
   const finalReport = `
 # ${title}
@@ -632,19 +701,25 @@ ${learnings.map(learning => `- ${learning}`).join('\n')}
 ${visitedUrls.map(url => `- ${url}`).join('\n')}
 `;
 
-  output.log("Final report generated.");
+  const finalReportContent = await trimPrompt(finalReport, systemPrompt.length);
+
+  output.log("Final Research Report:", { finalReportContent });
 
   // 3. Store report in cache
   try {
-    reportCache.set(cacheKey, finalReport);
+    reportCache.set(cacheKey, { 
+      __returned: finalReportContent,
+      __abortController: new AbortController(),
+      __staleWhileFetching: undefined
+    });
     output.log(`Cached report for key: ${cacheKey}`);
   } catch (cacheSetError) {
-    output.log("Error setting report to cache:", cacheSetError);
+    output.log("Error setting report to cache:", { error: cacheSetError instanceof Error ? cacheSetError.message : 'Unknown error' });
   }
 
-  output.saveResearchReport(finalReport);
+  output.saveResearchReport(finalReportContent);
 
-  return finalReport;
+  return finalReportContent;
 }
 
 export async function research(options: ResearchOptions): Promise<ResearchResult> {
@@ -683,7 +758,7 @@ async function someFunction() {
   const embedding = await generateTextEmbedding(textToEmbed);
 
   if (embedding) {
-    output.log("Generated Embedding:", embedding);
+    output.log("Generated Embedding:", { embedding });
     // ... use the embedding for semantic search, clustering, etc. ...
   } else {
     output.log("Failed to generate text embedding.");
@@ -695,8 +770,10 @@ interface GeminiResponse {
 }
 
 interface ProcessedGeminiResponse {
+    analysis: string;
     learnings: string[];
     urls: string[];
+    citations: { reference: string; context: string }[];
 }
 
 async function processGeminiResponse(geminiResponseText: string): Promise<ProcessedGeminiResponse> {
@@ -725,37 +802,37 @@ async function processGeminiResponse(geminiResponseText: string): Promise<Proces
     learnings = learnings.map(l => l.replace(/\[.*?\]/g, '').trim()).filter(l => l.length > 0);
   }
 
-  return { 
-    learnings: learnings.slice(0, 10), // Changed from 5 to 10
-    urls: Array.from(new Set(urls)) // Deduplicate URLs
+  // Extract citations from response text
+  const citationMatches = geminiResponseText.match(/\[\[\d+\]\]/g) || [];
+  const citations = citationMatches.map(match => ({
+    reference: match,
+    context: geminiResponseText.split(match)[1]?.split('.')[0] || '' // Get first sentence after citation
+  }));
+
+  return {
+    analysis: '',
+    learnings: learnings.slice(0, 10),
+    urls: Array.from(new Set(urls)),
+    citations
   };
 }
 
-function validateAcademicOutput(text: string) {
+export function validateAcademicInput(input: string) {
+  return input.length > 10 && input.split(/\s+/).length >= 3;
+}
+
+export function validateAcademicOutput(text: string) {
   const validationMetrics = {
     citationDensity: (text.match(/\[\[\d+\]\]/g) || []).length / (text.split(/\s+/).length / 100),
     recentSources: (text.match(/\[\[\d{4}\]\]/g) || []).filter(yr => parseInt(yr) > 2019).length,
     conflictDisclosures: text.includes("Conflict Disclosure:") ? 1 : 0
   };
-
   return validationMetrics.citationDensity > 1.5 && 
          validationMetrics.recentSources > 3 &&
          validationMetrics.conflictDisclosures === 1;
 }
 
-// Only ONE ResearchResult definition
-interface ResearchResult {
-  content: string;
-  sources: string[];
-  methodology: string;
-  limitations: string;
-  citations: Array<{ source: string; context: string }>;
-  // Add missing fields required by other files
-  learnings: string[];        // Required by run.ts and mcp-server.ts
-  visitedUrls: string[];      // Required by run.ts and mcp-server.ts
-}
-
-// Update conductResearch return type
+// Update conductResearch to use real sources
 export async function conductResearch(
   query: string,
   depth: number = 3
@@ -776,14 +853,54 @@ export async function conductResearch(
 
   const results = await Promise.all(researchChain);
   
+  // Get actual Firecrawl results
+  const firecrawlResponse = await firecrawl.search(query);
+  
   return {
     content: results.join('\n\n'),
-    sources: [], // Add actual sources
+    sources: firecrawlResponse.data
+      .map(result => result.url)
+      .filter((url): url is string => typeof url === 'string'), // Type guard
     methodology: 'Semantic chunking with Gemini Flash 2.0',
     limitations: 'Current implementation focuses on text analysis only',
-    citations: [], // Add actual citations
-    learnings: [],    // Add empty arrays to satisfy interface
-    visitedUrls: []   // Add empty arrays to satisfy interface
+    citations: results.flatMap(r => 
+      (r.match(/\[\[\d+\]\]/g) || []).map(ref => ({ reference: ref }))
+    ), // Extract citations from content
+    learnings: [],    
+    visitedUrls: [],
+    firecrawlResults: { metadata: { success: false, error: 'No metadata' }, ...firecrawlResponse } as unknown as SearchResponse,
+    analysis: ''
   };
 }
+
+// Create proper empty ResearchResult objects
+const createEmptyResearchResult = (): ResearchResult => ({
+  content: '',
+  sources: [],
+  methodology: '',
+  limitations: '',
+  citations: [],
+  learnings: [],
+  visitedUrls: [],
+  firecrawlResults: { metadata: {} } as SearchResponse,
+  analysis: ''
+});
+
+// Add type-safe firecrawl result handling
+interface FirecrawlResult {
+  url?: string;
+  // Add other expected properties
+}
+
+// Update the SearchResponse interface to include metadata
+interface SearchResponse {
+  data: FirecrawlResult[];
+  metadata: { success: boolean; error: string }; // Add metadata property
+}
+
+// Then use in processFirecrawlData:
+const processFirecrawlData = (result: any): SearchResponse => ({
+  data: (result?.data || []).filter((item: FirecrawlResult): item is FirecrawlResult => !!item?.url),
+  metadata: result?.metadata || { success: false, error: 'No metadata' } // Now matches interface
+});
 

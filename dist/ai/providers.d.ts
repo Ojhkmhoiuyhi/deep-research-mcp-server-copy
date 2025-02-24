@@ -17,11 +17,23 @@ export declare function createPrompt(template: string, variables: Record<string,
  */
 export declare function generateTextEmbedding(text: string): Promise<number[] | null>;
 export declare function callGeminiProConfigurable(prompt: string, modelName?: string, temperature?: number, safetySettings?: any): Promise<string>;
-export type ResearchResult = {
+export type ResearchResultOutput = {
+    content: string;
+    sources: string[];
+    methodology: string;
+    limitations: string;
+    citations: Array<{
+        source: string;
+        context: string;
+    }>;
     learnings: string[];
     visitedUrls: string[];
 };
-export declare function semanticChunking(text: string, model?: string): Promise<string[]>;
+export interface TextSplitter {
+    splitText(text: string): Promise<string[]>;
+    chunkSize: number;
+}
+export declare function semanticChunking(text: string, splitter?: TextSplitter): Promise<string[]>;
 export declare function adaptivePrompt(basePrompt: string, context: string[], similarityThreshold?: number): Promise<string>;
 export declare class SemanticTextSplitter {
     splitText(text: string): Promise<string[]>;

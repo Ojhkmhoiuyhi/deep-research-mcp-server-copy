@@ -7,7 +7,7 @@ import { OutputManager } from './output-manager.js';
 const output = new OutputManager();
 // Helper function for consistent logging
 function log(...args) {
-    output.log(...args);
+    output.log(args.map(arg => typeof arg === 'string' ? arg : JSON.stringify(arg)).join(' '));
 }
 const rl = readline.createInterface({
     input: process.stdin,

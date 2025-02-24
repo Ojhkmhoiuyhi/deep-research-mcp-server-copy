@@ -4,8 +4,15 @@ export declare class OutputManager {
     private progressArea;
     private initialized;
     private lastLogMessage;
+    private logQueue;
+    private logTimer?;
     constructor();
-    log(...args: any[]): void;
+    private formatLogEntry;
+    log(message: string, metadata?: Record<string, unknown>): void;
+    private enqueueLog;
+    private scheduleFlush;
+    private flushLogs;
+    static logCacheEviction(value: unknown): void;
     updateProgress(progress: ResearchProgress): void;
     private getProgressBar;
     private drawProgress;

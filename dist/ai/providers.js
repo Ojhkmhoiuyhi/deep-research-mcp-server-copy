@@ -1,6 +1,6 @@
 import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from "@google/generative-ai";
 import { z } from 'zod';
-import { RecursiveCharacterTextSplitter } from './text-splitter.js';
+import { RecursiveCharacterTextSplitter, SemanticTextSplitter as SemanticSplitter } from './text-splitter.js';
 import { cosineSimilarity } from "ai";
 const average = (arr) => arr.reduce((a, b) => a + b, 0) / arr.length;
 // Initialize with proper environment validation
@@ -13,46 +13,121 @@ const validateEnv = () => {
 const googleAI = validateEnv();
 // Model configuration with type safety
 const ModelConfigSchema = z.object({
-    model: z.string(),
+    model: z.literal("gemini-2.0-flash"), // Enforce specific model version
     generationConfig: z.object({
-        temperature: z.number().min(0).max(1).optional(),
-        topP: z.number().min(0).max(1).optional(),
-    }).optional(),
+        temperature: z.number().min(0).max(1).default(0.2),
+        topP: z.number().min(0).max(1).default(0.95),
+        topK: z.number().min(1).max(40).default(32), // Add missing parameter
+        maxOutputTokens: z.number().min(1).max(8192).default(8192)
+    }),
     safetySettings: z.array(z.object({
         category: z.nativeEnum(HarmCategory),
-        threshold: z.nativeEnum(HarmBlockThreshold)
-    })).optional(),
+        threshold: z.nativeEnum(HarmBlockThreshold).default(HarmBlockThreshold.BLOCK_LOW_AND_ABOVE)
+    })).default([
+        {
+            category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+            threshold: HarmBlockThreshold.BLOCK_LOW_AND_ABOVE
+        },
+        {
+            category: HarmCategory.HARM_CATEGORY_HARASSMENT,
+            threshold: HarmBlockThreshold.BLOCK_LOW_AND_ABOVE
+        },
+        {
+            category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+            threshold: HarmBlockThreshold.BLOCK_LOW_AND_ABOVE
+        },
+        {
+            category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+            threshold: HarmBlockThreshold.BLOCK_LOW_AND_ABOVE
+        }
+    ])
 });
 const getModel = (config) => {
     ModelConfigSchema.parse(config);
     return googleAI.getGenerativeModel(config);
 };
+// Complete safety settings override
+const disabledSafety = Object.values(HarmCategory).map(category => ({
+    category,
+    threshold: HarmBlockThreshold.BLOCK_NONE
+}));
 // Configure models with proper types
 export const embeddingModel = googleAI.getGenerativeModel({
-    model: "text-embedding-004" // Official Gemini embedding model
-});
-export const flashModel = googleAI.getGenerativeModel({
-    model: "gemini-2.0-flash", // Fast model for token operations
-    generationConfig: { temperature: 0.2 }
+    model: "text-embedding-004",
+    taskType: "RETRIEVAL_DOCUMENT", // @ts-ignore - Special embedding param
+    dimensions: 768,
+    safetySettings: disabledSafety
+}); // Temporary workaround for SDK type limitations
+export const flashModel = getModel({
+    model: "gemini-2.0-flash",
+    generationConfig: {
+        temperature: 0.2,
+        topP: 0.95,
+        topK: 32,
+        maxOutputTokens: 8192
+    },
+    safetySettings: disabledSafety
 });
 export const researchModel = getModel({
     model: "gemini-2.0-flash",
-    generationConfig: { temperature: 0.2, topP: 0.95 },
-    safetySettings: [{
-            category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-            threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH
-        }]
+    generationConfig: { temperature: 0.2, topP: 0.95, topK: 32, maxOutputTokens: 8192 },
+    safetySettings: disabledSafety
 });
 // Models
-const genAIModel = googleAI.getGenerativeModel({ model: "gemini-2.0-pro-exp-02-05" });
-const genAIModel2 = googleAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-const genAIModel3 = googleAI.getGenerativeModel({ model: "gemini-2.0-flash-thinking-exp-01-21" });
-const genAIModel4 = googleAI.getGenerativeModel({ model: "text-embedding-004" }); // Specify embedding model - embedding-001 is the latest recommended
+const genAIModel = googleAI.getGenerativeModel({
+    model: "gemini-2.0-flash-thinking-exp-01-21",
+    generationConfig: {
+        temperature: 0.2,
+        topP: 0.95,
+        topK: 32,
+        maxOutputTokens: 8192
+    },
+    safetySettings: disabledSafety
+});
+const genAIModel2 = googleAI.getGenerativeModel({
+    model: "gemini-2.0-flash",
+    generationConfig: {
+        temperature: 0.2,
+        topP: 0.95,
+        topK: 32,
+        maxOutputTokens: 8192
+    },
+    safetySettings: disabledSafety
+});
+const genAIModel3 = googleAI.getGenerativeModel({
+    model: "gemini-2.0-flash-thinking-exp-01-21",
+    generationConfig: {
+        temperature: 0.2,
+        topP: 0.95,
+        topK: 32,
+        maxOutputTokens: 8192
+    },
+    safetySettings: disabledSafety
+});
+const genAIModel4 = googleAI.getGenerativeModel({
+    model: "text-embedding-004",
+    taskType: "RETRIEVAL_DOCUMENT", // @ts-ignore
+    dimensions: 768
+});
 export const o3MiniModel = genAIModel;
 export const o3MiniModel2 = genAIModel2;
 export const o3MiniModel3 = genAIModel3;
 export const o3MiniModel4 = genAIModel4;
-const MinChunkSize = 140; // TODO: Consider making this configurable or a named constant in a config file
+// Create a configuration object for chunk settings
+const TextProcessingConfig = {
+    MIN_CHUNK_SIZE: 140,
+    MAX_CHUNK_SIZE: 8192,
+    CHUNK_OVERLAP: 20
+};
+// Update splitter usage
+const splitter = new SemanticSplitter({
+    chunkSize: TextProcessingConfig.MIN_CHUNK_SIZE,
+    chunkOverlap: TextProcessingConfig.CHUNK_OVERLAP
+});
+// Make configurable via environment
+const getChunkSize = () => process.env.CHUNK_SIZE ?
+    Number(process.env.CHUNK_SIZE) :
+    TextProcessingConfig.MIN_CHUNK_SIZE;
 // Update trimPrompt to use flashModel directly
 export async function trimPrompt(prompt, maxTokens) {
     if (!prompt)
@@ -66,14 +141,10 @@ export async function trimPrompt(prompt, maxTokens) {
         return prompt;
     const overflowTokens = tokenLength - maxTokens;
     const chunkSize = prompt.length - Math.floor(overflowTokens * 3);
-    if (chunkSize < MinChunkSize) { // Minimum chunk size to prevent overly aggressive trimming
-        return prompt.slice(0, MinChunkSize);
+    if (chunkSize < getChunkSize()) { // Minimum chunk size to prevent overly aggressive trimming
+        return prompt.slice(0, getChunkSize());
     }
-    const splitter = new RecursiveCharacterTextSplitter({
-        chunkSize,
-        chunkOverlap: 0,
-    });
-    const trimmedPrompt = splitter.splitText(prompt)[0] ?? '';
+    const trimmedPrompt = (await splitter.splitText(prompt))[0] ?? '';
     if (trimmedPrompt.length === prompt.length) {
         return trimPrompt(prompt.slice(0, chunkSize), maxTokens);
     }
@@ -123,16 +194,16 @@ export async function callGeminiProConfigurable(prompt, modelName = "gemini-2.0-
         return "";
     }
 }
-// Update semantic chunking to handle null embeddings
-export async function semanticChunking(text, model = "text-embedding-004") {
-    const embedding = await generateTextEmbedding(text);
-    if (!embedding) {
-        // Fallback to recursive splitter if embedding fails
-        const splitter = new RecursiveCharacterTextSplitter({ chunkSize: 1000 });
-        return splitter.splitText(text);
+// Update semanticChunking to use unified interface
+export async function semanticChunking(text, splitter) {
+    const effectiveSplitter = splitter || new RecursiveCharacterTextSplitter();
+    try {
+        return await effectiveSplitter.splitText(text);
     }
-    const semanticBoundaries = detectSemanticShifts(embedding);
-    return splitTextBySemanticBoundaries(text, semanticBoundaries, embedding);
+    catch (error) {
+        console.error('Chunking error:', error);
+        return [text]; // Fallback to original text
+    }
 }
 function detectSemanticShifts(embedding, windowSize = 5) {
     const boundaries = [];

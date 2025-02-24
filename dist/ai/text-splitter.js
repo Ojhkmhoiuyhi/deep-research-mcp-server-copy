@@ -21,19 +21,18 @@ class TextSplitter {
             throw new Error('Cannot have chunkOverlap >= chunkSize');
         }
     }
-    createDocuments(texts) {
+    async createDocuments(texts) {
         const documents = [];
-        for (let i = 0; i < texts.length; i += 1) {
-            const text = texts[i];
+        for (const text of texts) {
             if (text != null) {
-                for (const chunk of this.splitText(text)) {
+                for (const chunk of await this.splitText(text)) {
                     documents.push(chunk);
                 }
             }
         }
         return documents;
     }
-    splitDocuments(documents) {
+    async splitDocuments(documents) {
         return this.createDocuments(documents);
     }
     joinDocs(docs, separator) {
@@ -49,34 +48,27 @@ class TextSplitter {
             const _len = await this.getTokenCount(d);
             if (total + _len >= this.chunkSize) {
                 if (currentDoc.length > 0) {
-                    const doc = this.joinDocs(currentDoc, separator);
-                    if (doc)
-                        docs.push(doc);
-                    while (total > this.chunkOverlap) {
-                        if (currentDoc[0]) {
-                            total -= await this.getTokenCount(currentDoc[0]);
-                        }
-                        currentDoc.shift();
-                    }
+                    const joined = this.joinDocs(currentDoc, separator);
+                    if (joined)
+                        docs.push(joined);
+                    currentDoc = [];
+                    total = 0;
+                }
+                // Handle current document
+                if (_len > this.chunkSize) {
+                    continue; // Or implement chunk splitting logic
                 }
             }
             currentDoc.push(d);
             total += _len;
         }
-        const finalDoc = this.joinDocs(currentDoc, separator);
-        if (finalDoc)
-            docs.push(finalDoc);
+        // Final document
+        if (currentDoc.length > 0) {
+            const finalJoined = this.joinDocs(currentDoc, separator);
+            if (finalJoined)
+                docs.push(finalJoined);
+        }
         return docs;
-    }
-    async getTokenCount(text) {
-        try {
-            const result = await embeddingModel.countTokens(text);
-            return result.totalTokens;
-        }
-        catch (error) {
-            console.error('Gemini token count failed, using fallback:', error);
-            return text.split(/\s+/).length;
-        }
     }
 }
 export class RecursiveCharacterTextSplitter extends TextSplitter {
@@ -89,7 +81,7 @@ export class RecursiveCharacterTextSplitter extends TextSplitter {
         super(fields);
         this.separators = fields?.separators ?? this.separators;
     }
-    splitText(text) {
+    async splitText(text) {
         const splits = [];
         let currentText = text;
         for (const separator of this.separators) {
@@ -98,7 +90,7 @@ export class RecursiveCharacterTextSplitter extends TextSplitter {
             for (const s of split) {
                 if (s.length > this.chunkSize) {
                     // Recursively split the text
-                    const recursiveSplits = this.splitText(s);
+                    const recursiveSplits = await this.splitText(s);
                     newSplits.push(...recursiveSplits);
                 }
                 else {
@@ -142,7 +134,7 @@ export class TiktokenTextSplitter extends TextSplitter {
             return text.split(/\s+/).length;
         }
     }
-    splitText(text) {
+    async splitText(text) {
         const encoded = this.tokenizer.encode(text);
         const chunks = [];
         let currentChunk = [];
@@ -171,12 +163,9 @@ export class TiktokenTextSplitter extends TextSplitter {
         return finalChunks;
     }
 }
-export class SemanticTextSplitter {
-    chunkSize;
-    chunkOverlap;
+export class SemanticTextSplitter extends TextSplitter {
     constructor({ chunkSize = 2000, chunkOverlap = 200 } = {}) {
-        this.chunkSize = chunkSize;
-        this.chunkOverlap = chunkOverlap;
+        super({ chunkSize, chunkOverlap });
     }
     async splitText(text) {
         const embedding = await embeddingModel.embedContent(text);
@@ -192,4 +181,11 @@ export class SemanticTextSplitter {
         }
         return chunks;
     }
+    async getTokenCount(text) {
+        return text.split(/\s+/).length; // Simple word count fallback
+    }
+    tokenizer = {
+        encode: (text) => [],
+        decode: (tokens) => ""
+    };
 }
