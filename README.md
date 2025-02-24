@@ -86,7 +86,7 @@ flowchart TB
 
 **What are Persona Agents?**
 
-In `open-deep-research`, we utilize the concept of "persona agents" to guide the behavior of the Gemini language models.  Instead of simply prompting the LLM with a task, we imbue it with a specific **role, skills, personality, communication style, and values.** This approach helps to:
+In `deep-research`, we utilize the concept of "persona agents" to guide the behavior of the Gemini language models.  Instead of simply prompting the LLM with a task, we imbue it with a specific **role, skills, personality, communication style, and values.** This approach helps to:
 
 * **Focus the LLM's Output:** By defining a clear persona, we encourage the LLM to generate responses that are aligned with the desired expertise and perspective.
 * **Improve Consistency:** Personas help maintain a consistent tone and style throughout the research process.
@@ -99,7 +99,7 @@ In `open-deep-research`, we utilize the concept of "persona agents" to guide the
 * **Expert Research Query Refiner & Strategic Advisor:**  For generating follow-up questions, this persona embodies strategic thinking, user intent understanding, and the ability to guide users towards clearer and more effective research questions.
 * **Professional Doctorate Level Researcher (System Prompt):**  This overarching persona, applied to the main system prompt, sets the tone for the entire research process, emphasizing expert-level analysis, logical structure, and in-depth investigation.
 
-By leveraging persona agents, `open-deep-research` aims to achieve more targeted, consistent, and high-quality research outcomes from the Gemini language models.
+By leveraging persona agents, `deep-research` aims to achieve more targeted, consistent, and high-quality research outcomes from the Gemini language models.
 
 ## How It Works
 
@@ -155,7 +155,7 @@ By leveraging persona agents, `open-deep-research` aims to achieve more targeted
 
 ### As MCP Tool
 
-To run `open-deep-research` as an MCP tool, start the MCP server:
+To run `deep-research` as an MCP tool, start the MCP server:
 
 ```bash
 node --env-file .env.local dist/mcp-server.js
@@ -197,7 +197,7 @@ invokeDeepResearchTool();
 
 ### Standalone CLI Usage
 
-To run `open-deep-research` directly from the command line:
+To run `deep-research` directly from the command line:
 
 ```bash
 npm run start "your research query"
