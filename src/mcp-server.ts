@@ -16,7 +16,7 @@ config({ path: resolve(__dirname, '../.env.local') });
 
 // Helper function to log to stderr
 const log = (...args: any[]) => {
-  process.stderr.write(`${args.map(arg => 
+  process.stderr.write(`${args.map(arg =>
     typeof arg === 'string' ? arg : JSON.stringify(arg)
   ).join(' ')}\n`);
 };

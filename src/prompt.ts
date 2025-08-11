@@ -15,9 +15,9 @@ export const systemPrompt = () => {
 
   const researchPhase = () => {
     return hour < 6 ? 'Night: Batch processing' :
-           hour < 12 ? 'Morning: Discovery' :
-           hour < 18 ? 'Afternoon: Validation' :
-           'Evening: Synthesis';
+            hour < 12 ? 'Morning: Discovery' :
+            hour < 18 ? 'Afternoon: Validation' :
+            'Evening: Synthesis';
   };
 
   const instructions = [
@@ -44,20 +44,20 @@ export const systemPrompt = () => {
   ].join("\n");
 
   // Add time-based research parameters
-  const timeContext = hour < 12 
-    ? "Morning Research Protocol: Aggressive discovery phase" 
+  const timeContext = hour < 12
+    ? "Morning Research Protocol: Aggressive discovery phase"
     : "Afternoon Research Protocol: Validation & synthesis focus";
 
   return `## Research Agent Configuration
 **Temporal Context:** ${timeContext}
-**System Time:** ${now.toLocaleDateString('en-US', { 
-    weekday: 'long', 
-    year: 'numeric', 
-    month: 'long', 
+**System Time:** ${now.toLocaleDateString('en-US', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
     day: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
-    timeZoneName: 'short' 
+    timeZoneName: 'short'
   })}
 **Research Protocol:** v2.3.1
 **Model Capabilities:** ${process.env.GEMINI_MODEL || "gemini-2.0-flash"}
@@ -73,7 +73,7 @@ ${instructions.map((i, idx) => `${idx + 1}. ${i}`).join("\n")}`;
 export const serpQueryPromptTemplate = `## Search Strategy Configuration
 **Query Type Distribution:**
 - Informational: 40%
-- Comparative: 25% 
+- Comparative: 25%
 - Technical: 20%
 - Exploratory: 15%
 
@@ -152,11 +152,11 @@ export const feedbackPromptTemplate = `## Query Refinement Matrix
 // --- REVISED generateGeminiPrompt FUNCTION ---
 export const generateGeminiPrompt = ({
   query,        // Now used
-  researchGoal, // Now used 
+  researchGoal, // Now used
   learnings    // Now used
-}: { 
-  query: string, 
-  researchGoal: string, 
+}: {
+  query: string,
+  researchGoal: string,
   learnings: string[]
 }): string => {
   // Implement actual logic using all parameters
@@ -177,7 +177,7 @@ const validatePromptConsistency = () => {
     const content = typeof t === 'function' ? t() : t;
     return content.match(/Schema Version: (\d+\.\d+\.\d+)/)?.[1];
   });
-  
+
   if (new Set(versions).size > 1) {
     throw new Error(`Prompt version mismatch: ${versions.join(' vs ')}`);
   }

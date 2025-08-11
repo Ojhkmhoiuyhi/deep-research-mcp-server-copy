@@ -1,6 +1,5 @@
 import { Tiktoken, getEncoding, TiktokenEncoding } from "js-tiktoken";
-import { embeddingModel } from './providers.js';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { generateTextEmbedding, countTokens as countModelTokens } from './providers.js';
 
 export interface TextSplitterParams {
   chunkSize: number;
@@ -22,8 +21,8 @@ const modelConfig: { [modelName: string]: { maxTokens: number } } = {
 };
 
 abstract class TextSplitter implements TextSplitterParams {
-  chunkSize = 600;
-  chunkOverlap = 100;
+  chunkSize = 1500;
+  chunkOverlap = 200;
   modelName: string = "o200k_base";
   maxTokens: number; //  Remove default value
   protected abstract tokenizer: Tiktoken;  // Add abstract declaration
@@ -76,7 +75,9 @@ abstract class TextSplitter implements TextSplitterParams {
       if (total + _len >= this.chunkSize) {
         if (currentDoc.length > 0) {
           const joined = this.joinDocs(currentDoc, separator);
-          if (joined) docs.push(joined);
+          if (joined) {
+            docs.push(joined);
+          }
           currentDoc = [];
           total = 0;
         }
@@ -93,7 +94,9 @@ abstract class TextSplitter implements TextSplitterParams {
     // Final document
     if (currentDoc.length > 0) {
       const finalJoined = this.joinDocs(currentDoc, separator);
-      if (finalJoined) docs.push(finalJoined);
+      if (finalJoined) {
+        docs.push(finalJoined);
+      }
     }
 
     return docs;
@@ -113,9 +116,9 @@ export class RecursiveCharacterTextSplitter
 {
   separators: string[] = ["\n\n", "\n", " ", ""];
   protected tokenizer = {
-    encode: (text: string) => [], // Dummy implementation
-    decode: (tokens: number[]) => "" 
-  };
+    encode: (text: string) => Array.from(new TextEncoder().encode(text)),
+    decode: (tokens: number[]) => new TextDecoder().decode(Uint8Array.from(tokens))
+  } as unknown as Tiktoken;
 
   constructor(fields?: Partial<TextSplitterParams> & { separators?: string[] }) {
     super(fields);
@@ -132,7 +135,6 @@ export class RecursiveCharacterTextSplitter
 
       for (const s of split) {
         if (s.length > this.chunkSize) {
-          // Recursively split the text
           const recursiveSplits = await this.splitText(s);
           newSplits.push(...recursiveSplits);
         } else {
@@ -140,10 +142,9 @@ export class RecursiveCharacterTextSplitter
         }
       }
 
-      currentText = newSplits.join(separator); // Join with the current separator for the next iteration
+      currentText = newSplits.join(separator); 
     }
 
-    // Handle any remaining text that couldn't be split
     if (currentText.length > 0) {
       splits.push(currentText);
     }
@@ -153,8 +154,7 @@ export class RecursiveCharacterTextSplitter
 
   async getTokenCount(text: string): Promise<number> {
     try {
-      const result = await embeddingModel.countTokens(text);
-      return result.totalTokens;
+      return await countModelTokens([{ role: 'user', parts: [{ text }] }]);
     } catch (error) {
       console.error('Gemini token count failed, using fallback:', error);
       return text.split(/\s+/).length;
@@ -163,19 +163,25 @@ export class RecursiveCharacterTextSplitter
 }
 
 export class TiktokenTextSplitter extends TextSplitter {
-  protected tokenizer = { 
-    encode: (text: string) => [], // Formal implementation only
-    decode: (tokens: number[]) => ""
-  };
+  protected tokenizer: Tiktoken;
 
   constructor(fields?: Partial<TiktokenTextSplitterParams>) {
     super(fields);
+    const encName = (this.modelName as TiktokenEncoding) || ("o200k_base" as TiktokenEncoding);
+    try {
+      this.tokenizer = getEncoding(encName);
+    } catch {
+      this.tokenizer = {
+        encode: (text: string) => Array.from(new TextEncoder().encode(text)),
+        decode: (tokens: number[]) => new TextDecoder().decode(Uint8Array.from(tokens)),
+        free: () => {}
+      } as unknown as Tiktoken;
+    }
   }
 
   async getTokenCount(text: string): Promise<number> {
     try {
-      const result = await embeddingModel.countTokens(text);
-      return result.totalTokens;
+      return await countModelTokens([{ role: 'user', parts: [{ text }] }]);
     } catch (error) {
       console.error('Gemini token count failed, using fallback:', error);
       return text.split(/\s+/).length;
@@ -203,14 +209,16 @@ export class TiktokenTextSplitter extends TextSplitter {
       chunks.push(currentChunk);
     }
 
-    // Apply overlap
     const finalChunks: string[] = [];
     for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
-      let overlapStart = Math.max(0, i * (this.chunkSize - this.chunkOverlap));
-      let overlapEnd = Math.min(encoded.length, (i + 1) * this.chunkSize);
-
-      const chunkWithOverlap = encoded.slice(overlapStart, overlapEnd);
+      const chunk = chunks[i]!;
+      const chunkLength = chunk.length;
+      const startIndex = Math.max(0, i * (this.chunkSize - this.chunkOverlap));
+      const endIndex = Math.min(
+        encoded.length,
+        startIndex + chunkLength + this.chunkOverlap
+      );
+      const chunkWithOverlap = encoded.slice(startIndex, endIndex);
       finalChunks.push(this.tokenizer.decode(chunkWithOverlap));
     }
 
@@ -219,7 +227,7 @@ export class TiktokenTextSplitter extends TextSplitter {
 }
 
 export class SemanticTextSplitter extends TextSplitter {
-  constructor({ chunkSize = 2000, chunkOverlap = 200 }: {
+  constructor({ chunkSize = 2500, chunkOverlap = 500 }: {
     chunkSize?: number;
     chunkOverlap?: number;
   } = {}) {
@@ -227,8 +235,7 @@ export class SemanticTextSplitter extends TextSplitter {
   }
 
   async splitText(text: string): Promise<string[]> {
-    const embedding = await embeddingModel.embedContent(text);
-    const vector = embedding.embedding.values;
+    const vector = await generateTextEmbedding(text);
     
     return this.calculateSemanticChunks(text, vector);
   }
@@ -246,12 +253,21 @@ export class SemanticTextSplitter extends TextSplitter {
   }
 
   async getTokenCount(text: string): Promise<number> {
-    return text.split(/\s+/).length; // Simple word count fallback
+    try {
+      return await countModelTokens([{ role: 'user', parts: [{ text }] }]);
+    } catch {
+      return text.split(/\s+/).length; 
+    }
   }
 
   protected tokenizer = {
-    encode: (text: string) => [],
-    decode: (tokens: number[]) => ""
+    encode: (text: string) => {
+      const parts = text.trim().length ? text.split(/\s+/) : [];
+      return parts.map((t) => t.length);
+    },
+    decode: (tokens: number[]) => {
+      return tokens.map((n) => 'x'.repeat(Math.max(1, n))).join(' ');
+    }
   };
 }
 

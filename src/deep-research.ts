@@ -6,13 +6,13 @@ import pLimit from 'p-limit';
 import pkg, { result } from 'lodash';
 const { escape } = pkg;
 
-import { 
-  type ResearchResultOutput,
+import {
   trimPrompt,
   o3MiniModel,
   o3MiniModel2,
   callGeminiProConfigurable,
-  generateTextEmbedding 
+  generateTextEmbedding,
+  generateBatch,
 } from './ai/providers.js';
 import { systemPrompt, serpQueryPromptTemplate, learningPromptTemplate, generateGeminiPrompt } from './prompt.js';
 import { RecursiveCharacterTextSplitter } from './ai/text-splitter.js';
@@ -68,10 +68,9 @@ export interface researchProgress {
 }
 
 // Configuration from environment variables
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-pro"; // Default to gemini-pro
-const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY;
-const FIRECRAWL_BASE_URL = process.env.FIRECRAWL_BASE_URL;
+const {GEMINI_API_KEY} = process.env;
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash"; // Default to gemini-pro
+const {FIRECRAWL_API_KEY, FIRECRAWL_BASE_URL} = process.env;
 const CONCURRENCY_LIMIT = parseInt(process.env.CONCURRENCY_LIMIT || "5", 10); // Default to 5
 
 if (!GEMINI_API_KEY) {
@@ -156,11 +155,21 @@ async function generateSerpQueries({
       const keyObject: any = { rawQuery, numQueries, researchGoal, initialQuery, depth, breadth };
 
       // Omit default values from the cache key
-      if (numQueries === DEFAULT_NUM_QUERIES) delete keyObject.numQueries;
-      if (researchGoal === "Initial query") delete keyObject.researchGoal;
-      if (initialQuery === rawQuery) delete keyObject.initialQuery; // Assuming initialQuery defaults to rawQuery
-      if (depth === 1) delete keyObject.depth;
-      if (breadth === 1) delete keyObject.breadth;
+      if (numQueries === DEFAULT_NUM_QUERIES) {
+        delete keyObject.numQueries;
+      }
+      if (researchGoal === "Initial query") {
+        delete keyObject.researchGoal;
+      }
+      if (initialQuery === rawQuery) {
+        delete keyObject.initialQuery;
+      } // Assuming initialQuery defaults to rawQuery
+      if (depth === 1) {
+        delete keyObject.depth;
+      }
+      if (breadth === 1) {
+        delete keyObject.breadth;
+      }
 
       // Hash the learnings array (example using a simple hash function)
       const learningsHash = learnings.length > 0 ? String(learnings.reduce((acc, val) => acc + val.charCodeAt(0), 0)) : '';
@@ -212,7 +221,7 @@ async function generateSerpQueries({
       geminiResult = await o3MiniModel.generateContent(finalPrompt);
       output.log('Gemini response:', { response: JSON.parse(JSON.stringify(geminiResult)) });
 
-      const geminiText = geminiResult.response?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      const geminiText = await geminiResult.response.text();
       if (typeof geminiText === 'string') {
         jsonString = geminiText;
       } else {
@@ -297,23 +306,22 @@ async function processSerpResult({
     return { learnings: [], followUpQuestions: [] };
   }
 
-  // Process each chunk with the LLM
-  const learnings: string[] = [];
-
-  for (const chunk of chunks) {
-    const prompt = learningPromptTemplate
+  // Process each chunk with the LLM (batched)
+  const prompts = chunks.map((chunk) =>
+    learningPromptTemplate
       .replace("{{query}}", query)
       .replace("{{title}}", (result.data[0] as any)?.title || "No Title")
       .replace("{{url}}", result.data[0]?.url || "No URL")
-      .replace("{{content}}", chunk);
-
-    const geminiResult = await (await o3MiniModel2.generateContent(prompt));
-
+      .replace("{{content}}", chunk)
+  );
+  const batchResults = await generateBatch(prompts);
+  const learnings: string[] = [];
+  for (const br of batchResults) {
+    const text = await br.response.text();
     const parsedResult = z.object({
       learnings: z.array(z.string()),
       followUpQuestions: z.array(z.string()),
-    }).safeParse(JSON.parse(geminiResult.response.text()));
-
+    }).safeParse(JSON.parse(text));
     if (parsedResult.success) {
       learnings.push(...(parsedResult.data.learnings ?? []));
     }
@@ -323,43 +331,74 @@ async function processSerpResult({
 }
 
 // Insert helper functions before writeFinalReport
-// New helper function to generate an outline from the prompt and learnings
+// New helper function to generate an outline from the prompt and learnings (schema-based)
 async function generateOutline(prompt: string, learnings: string[]): Promise<string> {
   try {
-    const outlinePrompt = `${systemPrompt()}\n\nBased on the prompt and the following learnings, generate a detailed outline for a research report:\nPrompt: ${prompt}\nLearnings:\n${learnings.join("\\n")}`;
-    const outlineResponse = await o3MiniModel.generateContent(outlinePrompt);
-    const outlineText = await outlineResponse.response.text();
-    return outlineText;
+    const schema = {
+      type: 'object',
+      properties: { outline: { type: 'array', items: { type: 'string' } } },
+      required: ['outline'],
+      additionalProperties: false,
+    };
+    const outlinePrompt = `${systemPrompt()}\n\nBased on the prompt and the following learnings, generate a detailed outline as JSON with an 'outline' array.\nPrompt: ${prompt}\nLearnings:\n${learnings.join("\\n")}`;
+    const json = await callGeminiProConfigurable(outlinePrompt, { json: true, schema });
+    let parsed: { outline?: string[] } = {};
+    try {
+      parsed = JSON.parse(json) as { outline?: string[] };
+    } catch {}
+    const outline = Array.isArray(parsed.outline) ? parsed.outline : [];
+    return outline.length ? outline.join('\n') : 'Outline could not be generated.';
   } catch (error) {
     output.log('Error in generateOutline:', { error });
     return 'Outline could not be generated.';
   }
 }
 
-// New helper function to write a report from the generated outline and learnings
+// New helper function to write a report from the generated outline and learnings (schema-based)
 async function writeReportFromOutline(outline: string, learnings: string[]): Promise<string> {
-  // Add sanitization step
   const cleanOutline = sanitizeReportContent(outline);
   const cleanLearnings = learnings.map(sanitizeReportContent);
-  
   try {
-    const reportPrompt = `${systemPrompt()}\n\nUsing the following outline and learnings, write a comprehensive research report.\nOutline:\n${cleanOutline}\nLearnings:\n${cleanLearnings.join("\\n")}`;
-    const reportResponse = await o3MiniModel.generateContent(reportPrompt);
-    const reportText = await reportResponse.response.text();
-    return reportText;
+    const schema = {
+      type: 'object',
+      properties: {
+        sections: { type: 'array', items: { type: 'string' } },
+        citations: { type: 'array', items: { type: 'string' } }
+      },
+      required: ['sections'],
+      additionalProperties: false,
+    };
+    const reportPrompt = `${systemPrompt()}\n\nUsing the following outline and learnings, produce a JSON with 'sections' (array of markdown strings) and optional 'citations'.\nOutline:\n${cleanOutline}\nLearnings:\n${cleanLearnings.join("\\n")}`;
+    const json = await callGeminiProConfigurable(reportPrompt, { json: true, schema });
+    let parsed: { sections?: string[]; citations?: string[] } = {};
+    try {
+      parsed = JSON.parse(json) as { sections?: string[]; citations?: string[] };
+    } catch {}
+    const body = (parsed.sections ?? []).join('\n\n');
+    const citations = parsed.citations && parsed.citations.length ? `\n\nReferences:\n${parsed.citations.map(c => `- ${c}`).join('\n')}` : '';
+    return body || 'Report could not be generated.' + citations;
   } catch (error) {
     output.log('Error in writeReportFromOutline:', { error });
     return 'Report could not be generated.';
   }
 }
 
-// New helper function to generate a summary from the learnings
+// New helper function to generate a summary from the learnings (schema-based)
 async function generateSummary(learnings: string[]): Promise<string> {
   try {
-    const summaryPrompt = `${systemPrompt()}\n\nGenerate a concise summary of the following learnings:\nLearnings:\n${learnings.join("\\n")}`;
-    const summaryResponse = await o3MiniModel.generateContent(summaryPrompt);
-    const summaryText = await summaryResponse.response.text();
-    return summaryText;
+    const schema = {
+      type: 'object',
+      properties: { summary: { type: 'string' } },
+      required: ['summary'],
+      additionalProperties: false,
+    };
+    const summaryPrompt = `${systemPrompt()}\n\nReturn JSON with a single 'summary' string for the following learnings:\nLearnings:\n${learnings.join("\\n")}`;
+    const json = await callGeminiProConfigurable(summaryPrompt, { json: true, schema });
+    let parsed: { summary?: string } = {};
+    try {
+      parsed = JSON.parse(json) as { summary?: string };
+    } catch {}
+    return typeof parsed.summary === 'string' ? parsed.summary : 'Summary could not be generated.';
   } catch (error) {
     output.log('Error in generateSummary:', { error });
     return 'Summary could not be generated.';
@@ -371,8 +410,7 @@ async function generateTitle(prompt: string, learnings: string[]): Promise<strin
   try {
     const titlePrompt = `${systemPrompt()}\n\nGenerate a concise and informative title for a research report based on the prompt and learnings:\nPrompt: ${prompt}\nLearnings:\n${learnings.join("\\n")}`;
     const titleResponse = await o3MiniModel.generateContent(titlePrompt);
-    const titleText = await titleResponse.response.text();
-    return titleText;
+    return await titleResponse.response.text();
   } catch (error) {
     output.log('Error in generateTitle:', { error });
     return 'Title could not be generated.';
@@ -685,19 +723,28 @@ export async function writeFinalReport({
   const finalReport = `
 # ${title}
 
-## Summary
+## Abstract
 ${summary}
 
-## Outline
+## Table of Contents
 ${outline}
 
-## Report
+## Introduction
+This report investigates the query: "${prompt}" using grounded web research with Gemini. The following sections synthesize findings, with citations inline where provided.
+
+## Body
 ${report}
 
-## Learnings
+## Methodology
+Semantic chunking, grounded generation (Google Search tool), and schema-guided synthesis. Learnings were extracted from source content, deduplicated, and compiled.
+
+## Limitations
+Automated extraction may miss nuance or context from sources. Some links may be unavailable or rate-limited at retrieval time.
+
+## Key Learnings
 ${learnings.map(learning => `- ${learning}`).join('\n')}
 
-## Visited URLs
+## References
 ${visitedUrls.map(url => `- ${url}`).join('\n')}
 `;
 
@@ -839,19 +886,12 @@ export async function conductResearch(
 ): Promise<ResearchResult> {
   const splitter = new SemanticTextSplitter();
   const chunks = await splitter.splitText(query);
-  
-  const researchChain = chunks.map(async (chunk) => {
-    const result = await researchModel.generateContent({
-      contents: [{
-        role: 'user',
-        parts: [{ text: chunk }]
-      }]
-    });
-    
-    return result.response.text();
-  });
-
-  const results = await Promise.all(researchChain);
+  // Batch model calls for all chunks
+  const prompts = chunks.map((chunk) => ({
+    contents: [{ role: 'user', parts: [{ text: chunk }] }]
+  }));
+  const batch = await generateBatch(prompts);
+  const results = await Promise.all(batch.map(b => b.response.text()));
   
   // Get actual Firecrawl results
   const firecrawlResponse = await firecrawl.search(query);
@@ -863,8 +903,8 @@ export async function conductResearch(
       .filter((url): url is string => typeof url === 'string'), // Type guard
     methodology: 'Semantic chunking with Gemini Flash 2.0',
     limitations: 'Current implementation focuses on text analysis only',
-    citations: results.flatMap(r => 
-      (r.match(/\[\[\d+\]\]/g) || []).map(ref => ({ reference: ref }))
+    citations: results.flatMap((r: string) =>
+      (r.match(/\[\[\d+\]\]/g) || []).map((ref: string) => ({ reference: ref }))
     ), // Extract citations from content
     learnings: [],    
     visitedUrls: [],

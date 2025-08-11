@@ -63,7 +63,9 @@ export class ProgressManager {
    * @param progress - An object containing the current research progress.
    */
   updateProgress(progress: ResearchProgress): void { // Added return type void
-    if (!this.initialized) return;
+    if (!this.initialized) {
+      return;
+    }
 
     // Store progress for potential redraw or access
     this.lastProgress = progress;
@@ -120,7 +122,9 @@ export class ProgressManager {
    * Stops the progress display and moves the cursor below the progress area.
    */
   stop(): void { // Added return type void
-    if (!this.initialized) return;
+    if (!this.initialized) {
+      return;
+    }
 
     try {
       // Move cursor down past the progress area, ensuring subsequent output is below the progress bars

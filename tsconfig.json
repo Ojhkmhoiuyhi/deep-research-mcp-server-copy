@@ -16,13 +16,14 @@
     "moduleResolution": "NodeNext",
     "noUncheckedIndexedAccess": true,
     "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames":true,
     "skipLibCheck": true,
     "strict": true,
     "target": "ES2022",
     "outDir": "./dist",
     "rootDir": "./src",
     "types": [
-      "@google/generative-ai"
+      "@google/genai"
     ]
   },
   "include": [

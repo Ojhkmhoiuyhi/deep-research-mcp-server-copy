@@ -13,7 +13,7 @@ const output = new OutputManager();
 // Helper function for consistent logging
 function log(...args: unknown[]) {
   output.log(
-    args.map(arg => 
+    args.map(arg =>
       typeof arg === 'string' ? arg : JSON.stringify(arg)
     ).join(' ')
   );

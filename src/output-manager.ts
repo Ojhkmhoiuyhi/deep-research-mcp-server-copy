@@ -51,7 +51,9 @@ export class OutputManager {
       process.stdout.write(this.logQueue.join('\n') + '\n');
       this.logQueue = [];
     } finally {
-      if (this.logTimer) clearTimeout(this.logTimer);
+      if (this.logTimer) {
+        clearTimeout(this.logTimer);
+      }
       process.stdout.write(TERMINAL_CONTROLS.restorePos);
     }
   }
@@ -61,7 +63,9 @@ export class OutputManager {
   }
   
   updateProgress(progress: ResearchProgress) {
-    if (!this.initialized) return;
+    if (!this.initialized) {
+      return;
+    }
 
     this.progressArea = [
       `Depth:    [${this.getProgressBar(progress.totalDepth - progress.currentDepth, progress.totalDepth)}] ${Math.round((progress.totalDepth - progress.currentDepth) / progress.totalDepth * 100)}%`,
@@ -71,16 +75,18 @@ export class OutputManager {
     ];
     this.drawProgress();
   }
-  
+
   private getProgressBar(value: number, total: number): string {
     const width = process.stdout.columns ? Math.min(30, process.stdout.columns - 20) : 30;
     const filled = Math.round((width * value) / total);
     return '█'.repeat(filled) + ' '.repeat(width - filled);
   }
-  
+
   private drawProgress() {
-    if (!this.initialized || this.progressArea.length === 0) return;
-    
+    if (!this.initialized || this.progressArea.length === 0) {
+      return;
+    }
+
     // Save cursor position
     process.stdout.write('\x1b[s');
 

@@ -13,4 +13,4 @@ export interface MCPResearchResult {
       totalSources: number;
     };
   };
-} 
+}

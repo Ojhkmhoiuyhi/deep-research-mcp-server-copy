@@ -44,3 +44,13 @@ bun.lockb
 dist/deep-research.d.ts
 dist/deep-research.d.ts.map
 dist/deep-research.js
+.roo/rules/structurd.md
+.roo/rules/output.md
+.roo/rules/project.md
+.roo/rules/mcp_bpract.md
+.roo/rules/google_rules.md
+.roo/rules/code_rules.md
+.roo/rules/cli.md
+TASKS.md
+.roo/rules/agent_flow.md
+.roo/rules/api.md

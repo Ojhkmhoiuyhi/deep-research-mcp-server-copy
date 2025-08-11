@@ -153,10 +153,18 @@ export async function generateFeedback({
   try {
     const keyObject: any = { query, numQuestions, researchGoal, depth, breadth, existingLearnings };
     // Omit default values for a more efficient key (optional, as before)
-    if (numQuestions === 3) delete keyObject.numQuestions;
-    if (researchGoal === "Understand the user's query") delete keyObject.researchGoal;
-    if (depth === 1) delete keyObject.depth;
-    if (breadth === 1) delete keyObject.breadth;
+    if (numQuestions === 3) {
+      delete keyObject.numQuestions;
+    }
+    if (researchGoal === "Understand the user's query") {
+      delete keyObject.researchGoal;
+    }
+    if (depth === 1) {
+      delete keyObject.depth;
+    }
+    if (breadth === 1) {
+      delete keyObject.breadth;
+    }
     const learningsHash = existingLearnings.length > 0 ? String(existingLearnings.reduce((acc, val) => acc + val.charCodeAt(0), 0)) : ''; // Hash learnings
     keyObject.learningsHash = learningsHash;
     cacheKey = JSON.stringify(keyObject);
@@ -202,7 +210,7 @@ Existing Learnings: ${existingLearnings.join('\n')}
   try {
     output.log(`Generating feedback for query: "${query}"...`); // Log using OutputManager
     const response = await o3MiniModel.generateContent(geminiPrompt);
-    const text = response.response?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const text = await response.response.text();
     if (!text) {
       throw new Error('Empty Gemini API response.');
     }
@@ -215,7 +223,7 @@ Existing Learnings: ${existingLearnings.join('\n')}
       output.log(`Error parsing Gemini JSON response: ${jsonError}`);
       output.log(`Raw Gemini Response causing JSON error:\n${text}`); // Log the problematic raw response
       // Consider setting a default or error feedback response here if JSON parsing fails critically
-      feedbackResponse = { 
+      feedbackResponse = {
         analysis: "Failed to parse feedback response. Please check logs for raw output.",
         followUpQuestions: [] // Add required array
       }; // Provide a fallback
