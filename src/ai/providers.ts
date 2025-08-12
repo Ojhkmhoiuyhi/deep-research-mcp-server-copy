@@ -23,13 +23,13 @@ const client = new GoogleGenAI({
 
 const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const MAX_TOKENS = clampNumber(parseInt(process.env.GEMINI_MAX_OUTPUT_TOKENS || '65536', 10), 1024, 65000);
-const TEMPERATURE = parseFloat(process.env.GEMINI_TEMPERATURE || '0.7');
+const TEMPERATURE = parseFloat(process.env.GEMINI_TEMPERATURE || '0.4');
 const TOP_P = parseFloat(process.env.GEMINI_TOP_P || '0.9');
 const TOP_K = clampNumber(parseInt(process.env.GEMINI_TOP_K || '40', 10), 1, 1000);
 const CANDIDATE_COUNT = clampNumber(parseInt(process.env.GEMINI_CANDIDATE_COUNT || '2', 10), 1, 8);
 const THINKING_BUDGET_TOKENS = clampNumber(parseInt(process.env.THINKING_BUDGET_TOKENS || '1500', 10), 0, 8000);
 const ENABLE_URL_CONTEXT = (process.env.ENABLE_URL_CONTEXT || 'true').toLowerCase() === 'true';
-const ENABLE_GEMINI_GOOGLE_SEARCH = (process.env.ENABLE_GEMINI_GOOGLE_SEARCH || 'false').toLowerCase() === 'true';
+const ENABLE_GEMINI_GOOGLE_SEARCH = (process.env.ENABLE_GEMINI_GOOGLE_SEARCH || 'true').toLowerCase() === 'true';
 const ENABLE_GEMINI_CODE_EXECUTION = (process.env.ENABLE_GEMINI_CODE_EXECUTION || 'false').toLowerCase() === 'true';
 const ENABLE_GEMINI_FUNCTIONS = (process.env.ENABLE_GEMINI_FUNCTIONS || 'false').toLowerCase() === 'true';
 const ENABLE_PROVIDER_CACHE = (process.env.ENABLE_PROVIDER_CACHE || 'true').toLowerCase() === 'true';

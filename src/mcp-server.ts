@@ -6,7 +6,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { research, writeFinalReport, type ResearchProgress, ResearchOptions } from "./deep-research.js";
 import { LRUCache } from 'lru-cache';
-import { ZodError } from 'zod';
+
 
 // Get the directory name of the current module
 const __dirname = fileURLToPath(new URL('.', import.meta.url));

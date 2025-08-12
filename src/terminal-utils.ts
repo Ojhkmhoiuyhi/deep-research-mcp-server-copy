@@ -37,4 +37,4 @@ export function getTerminalDimensions() {
     width: process.stdout.columns || 80,
     height: process.stdout.rows || 24
   };
-} 
+}

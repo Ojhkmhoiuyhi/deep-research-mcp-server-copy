@@ -1,4 +1,8 @@
 ---
+trigger: always_on
+---
+
+---
 description: Deep Research MCP Server – Rules and integration guide
 ---
 
