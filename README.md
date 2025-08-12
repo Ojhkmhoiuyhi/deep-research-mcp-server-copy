@@ -1,7 +1,7 @@
 # Deep Research MCP Server
 
 [![Node.js](https://img.shields.io/badge/node.js-v22.x-green?style=flat-square&logo=node.js)](https://nodejs.org/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-%5E5.3-blue?style=flat-square&logo=typescript)](https://www.typescriptlang.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-%5E5.9.2-blue?style=flat-square&logo=typescript)](https://www.typescriptlang.org/)
 [![Gemini API](https://img.shields.io/badge/Gemini_2.5-Flash-purple?style=flat-square&logo=google-gemini)](https://makersuite.google.com/app/apikey)
 [![MCP](https://img.shields.io/badge/MCP-Model_Context_Protocol-lightgrey?style=flat-square)](https://github.com/modelcontextprotocol)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
