@@ -54,3 +54,5 @@ dist/deep-research.js
 TASKS.md
 .roo/rules/agent_flow.md
 .roo/rules/api.md
+docs/migration-plan-granular-2025-08-11.md
+.vscode/settings.json

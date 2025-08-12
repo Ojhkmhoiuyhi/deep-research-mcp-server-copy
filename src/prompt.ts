@@ -1,5 +1,4 @@
 import { LRUCache } from 'lru-cache';
-import { hash } from 'ohash'; // Fast object hashing
 
 // Simplified cache config (v11 compatible)
 const promptCache = new LRUCache<string, string>({
@@ -60,7 +59,7 @@ export const systemPrompt = () => {
     timeZoneName: 'short'
   })}
 **Research Protocol:** v2.3.1
-**Model Capabilities:** ${process.env.GEMINI_MODEL || "gemini-2.0-flash"}
+**Model Capabilities:** ${process.env.GEMINI_MODEL || "gemini-2.5-flash"}
 **Research Phase:** ${researchPhase()}
 **Cognitive Load Profile:** ${hour < 12 ? 'High creativity' : 'High accuracy'} mode
 
@@ -77,7 +76,7 @@ export const serpQueryPromptTemplate = `## Search Strategy Configuration
 - Technical: 20%
 - Exploratory: 15%
 
-**Response Format Requirements:**
+**Response Format Requirements:** (Return ONLY JSON matching this schema. No extra text.)
 \`\`\`json
 {
   "queries": {
@@ -124,7 +123,9 @@ export const learningPromptTemplate = `## Content Analysis Protocol
   },
   "required": ["learnings"],
   "additionalProperties": false
-}`;
+}
+
+Return ONLY JSON that matches this schema. No extra text.`;
 
 export const feedbackPromptTemplate = `## Query Refinement Matrix
 **Quality Metrics:**
@@ -132,7 +133,7 @@ export const feedbackPromptTemplate = `## Query Refinement Matrix
 - Research Depth Potential
 - Answerability Estimate
 
-**Response Schema:**
+**Response Schema:** (Return ONLY JSON matching this schema. No extra text.)
 \`\`\`json
 {
   "followUpQuestions": {
