@@ -1,5 +1,4 @@
 ---
-Title: Deep Research MCP Server – Granular Migration Plan (Lotus Wisdom)
 Timestamp: 2025-08-11T09:56:51-04:00
 Version: 1.0.0
 Authors: Maintainers
@@ -21,7 +20,6 @@ Safety: Non-destructive; no commands
 
 - Env gates (defaults shown):
   - ENABLE_EXA_PRIMARY=false
-  - ENABLE_AGENT_LEARNING=true
   - AGENT_MEMORY_TTL_MS=604800000 (7d)
   - AGENT_MEMORY_MAX=500
   - ENABLE_GEMINI_GOOGLE_SEARCH=true
@@ -88,66 +86,41 @@ These diagrams guide Workstreams 4, 5, and 7 acceptance and implementation.
 ## Workstream 2): Exa Integration (Flag-Gated; Execute Last)
 
 - Goal:
-  - Integrate Exa (exa-js) as the primary search/crawl provider behind `ENABLE_EXA_PRIMARY`, without removing Firecrawl until approved. This workstream runs after new agents + Gemini settings are verified.
 - Files:
   - `.env.example` (add flags/keys)
   - `src/search/exa.ts` (new, real provider wrapper)
-  - `src/agents/gatherer.ts` (wire Exa path when flag enabled)
   - `src/deep-research.ts` (provider selection glue; no dead code)
   - `src/types.ts` (add/confirm types for Exa results)
-- Checklist:
   - Add env flags to `.env.example`: `ENABLE_EXA_PRIMARY=false`, `EXA_API_KEY=`, `EXA_MAX_RESULTS=10`, `EXA_TIMEOUT_MS=15000`.
-  - Implement `src/search/exa.ts` using exa-js:
     - `search(query, { maxResults, timeoutMs }): Promise<SearchHit[]>`
-    - `getContents(urls, { timeoutMs }): Promise<Array<{ url: string; content: string; title?: string; snippet?: string }>>`
     - Retries with backoff; bounded LRU cache with optional TTL; dedupe by URL.
-  - In `src/agents/gatherer.ts`, branch by `ENABLE_EXA_PRIMARY`:
     - If true, call Exa `search()` + `getContents()`; else use existing provider.
     - Normalize into shared `SearchHit[]` and content payloads used by analyzer.
-  - In `src/deep-research.ts`, ensure provider selection is centralized (no TODOs or stubs); keep Firecrawl path intact.
-  - Update `src/types.ts` with any Exa-specific fields if needed.
   - Document rollout and backout in README and rules docs.
-- Acceptance:
   - With `ENABLE_EXA_PRIMARY=false`, behavior identical to current pipeline.
-  - With `ENABLE_EXA_PRIMARY=true` and valid `EXA_API_KEY`, gatherer returns equivalent or richer normalized results; downstream analyzer/synthesizer unchanged.
   - No runtime TODO/stub code; all paths implemented and tested.
-- Backout:
   - Set `ENABLE_EXA_PRIMARY=false`.
-  - Revert `src/agents/gatherer.ts` Exa branch and `src/search/exa.ts` if needed.
 - Risks/Mitigation:
-  - Rate limits/timeouts: implement retry/backoff and sensible `EXA_TIMEOUT_MS` defaults; cache SERP/results.
   - Provider differences: normalize fields and enforce shared types.
 - Notes:
   - Do not remove Firecrawl until explicitly approved; Exa path is additive and gated by env.
   - Keep Google Search grounding via Gemini tools for augmentation/citations regardless of Exa flag.
-- Logs:
   - Record Exa search/content timings, result counts, retries, and cache hits; redact keys.
-
 ## Workstream 3) Agent Learning (Flag-Gated; Execute First)
-
 - Objective: Implement: Agent Learning via Cache
-
-- Goal:
-  - Enable agents to learn incrementally using a bounded cache (opt-in via `ENABLE_AGENT_LEARNING`) that enriches prompts and records distilled learnings without causing prompt bloat.
 - Files:
-  - `src/memory/agent-memory.ts` (new, real implementation)
   - `src/feedback.ts`, `src/deep-research.ts` (read/write integration)
   - `.env.example` (add flags)
 - Checklist:
-  - Create `src/memory/agent-memory.ts` with:
     - Types: `MemoryKey`, `MemoryRecord`.
     - API: `getSimilar(query: string, agent: string)`, `put(record: MemoryRecord)`, `prune()`.
     - Storage: in-memory LRU; optional JSONL persistence at `.cache/agent-memory.jsonl` behind `ENABLE_AGENT_LEARNING`.
-    - Bounds: `AGENT_MEMORY_MAX`, `AGENT_MEMORY_TTL_MS`; stable hash of normalized query.
   - Integrate reads:
-    - In `src/feedback.ts`, merge prior distilled follow-ups/insights (length-capped) when similar.
     - In `src/deep-research.ts`, add past learnings/citations to context blocks (token-capped).
   - Integrate writes:
     - After successful outputs, store compact records (learnings, citations, final sections metadata).
-  - Add env to `.env.example`: `ENABLE_AGENT_LEARNING=true`, `AGENT_MEMORY_TTL_MS=604800000`, `AGENT_MEMORY_MAX=500`.
 - Acceptance:
   - With learning enabled, similar queries yield augmented context from prior records; with it disabled, behavior unchanged.
-  - Cache bounded, persistence optional, no crashes if file missing.
 - Backout:
   - Disable flag; remove read/write call sites.
 - Notes:
@@ -218,9 +191,7 @@ These diagrams guide Workstreams 4, 5, and 7 acceptance and implementation.
   1) `validatePromptConsistency()`: convert throw to warn when “Schema Version” missing.
   2) Align model defaults: `systemPrompt()` uses `gemini-2.5-flash` to match providers.
   3) Keep responseMimeType/responseSchema set for analyzer/synthesizer/supervisor.
-- Acceptance:
   - `responseMimeType: "application/json"` + `responseSchema` enforced in provider calls for analyzer/synthesizer/supervisor; schemas locked for Outline/Sections/Summary.
-  - Prompts align with schemas (include required tokens/slots); min 2 citations per section parameterized and verifiable by supervisor.
   - No spurious exceptions; consistent model naming (`gemini-2.5-flash`).
 - Backout:
   - Revert warn back to strict throw if needed.
@@ -230,36 +201,17 @@ These diagrams guide Workstreams 4, 5, and 7 acceptance and implementation.
 ## Workstream 6): Jest Tests & Fixtures (Preparation)
 
 - Objective: Plan ESM Jest setup and key tests (no commands run here).
-- Files:
   - jest.config.ts, package.json (scripts), tests under src/**.test.ts
-{{ ... }}
   1) Plan Jest config (ts-jest ESM): preset `ts-jest/presets/default-esm`, transform `{"^.+\\.ts$": ["ts-jest", { useESM: true }]}`, extensionsToTreatAsEsm `[".ts"]`, testEnvironment `node`.
-  2) Migrate `src/ai/text-splitter.test.ts` to Jest APIs (describe/test/expect), provider-free.
   3) Add `src/deep-research.test.ts` using recorded fixtures for provider outputs (no network); verify `conductResearch()` pipeline assembly; snapshot final report.
-  4) Add `agent-memory.test.ts` covering put/getSimilar/prune with temp dir.
 - Acceptance:
-  - Tests compile locally once configured; no network calls.
 - Backout:
-  - Keep node:test suite until migration approved.
 - Risks/Mitigation:
-  - ESM friction: rely on ts-jest ESM preset and keep imports explicit.
 
-## Rollout Checklist
 
-----------
 
-- [ ] Types consolidated; no runtime changes.
 - [ ] Env flags documented in `.env.example`.
-- [ ] One repair pass policy enforced (MAX_REPAIR_PASSES=1); retries/timeouts configured (MAX_RETRIES, PHASE_TIMEOUT_MS, OVERALL_DEADLINE_MS).
 - [ ] Grounding enabled and gated (ENABLE_GEMINI_GOOGLE_SEARCH=true); progress bodies redacted (PROGRESS_REDACT_BODIES=true).
-- [ ] Citations policy enforced (MIN_CITATIONS_PER_SECTION=2; AUTHORITY_THRESHOLD documented).
-- [ ] Agent-memory added, read-only enrichment enabled behind flag.
-- [ ] Agent scaffolds added; orchestrator outlined.
-- [ ] MCP schemas tightened; progress/health tools added.
-- [ ] Console/logging decision recorded.
-- [ ] Prompt consistency warning applied; model default aligned.
-- [ ] Test plan prepared (no installs run).
-
 ----------
 
 ## Backout Plan (Global)
@@ -274,13 +226,11 @@ These diagrams guide Workstreams 4, 5, and 7 acceptance and implementation.
 ----------
 
 - Exa is optional and not implemented in this phase. All Exa references are docs/TODOs.
-- Firecrawl remains; removal pending explicit approval.
 - Keep `.env.example` synced whenever flags change.
 
 ----------
 
 ## Logs (fill during execution)
-
 ----------
 
 - 2025-08-11 08:44 ET: Plan authored, reviewed.

@@ -1,27 +1,14 @@
-import { z } from 'zod';
-import FirecrawlApp, { type SearchResponse as FirecrawlSearchResponse } from '@mendable/firecrawl-js';
+import { compact, escape as lodashEscape } from 'lodash-es';
 import { LRUCache } from 'lru-cache';
-import { compact } from 'lodash-es';
-import pLimit from 'p-limit';
-import pkg, { result } from 'lodash';
-const { escape } = pkg;
+import pLimit from 'p-limit'; // Concurrency limiter
+import { z } from 'zod';
 
-import {
-  trimPrompt,
-  o3MiniModel,
-  o3MiniModel2,
-  callGeminiProConfigurable,
-  generateTextEmbedding,
-  generateBatch,
-} from './ai/providers.js';
-import { systemPrompt, serpQueryPromptTemplate, learningPromptTemplate, generateGeminiPrompt } from './prompt.js';
-import { RecursiveCharacterTextSplitter } from './ai/text-splitter.js';
-import { error } from 'node:console';
-import { extractJsonFromText, isValidJSON, safeParseJSON, stringifyJSON } from './utils/json.js';
+import { callGeminiProConfigurable, generateBatch, generateBatchWithTools, trimPrompt } from './ai/providers.js';
+import { RecursiveCharacterTextSplitter, SemanticTextSplitter } from './ai/text-splitter.js';
 import { OutputManager } from './output-manager.js';
+import { generateGeminiPrompt, learningPromptTemplate, serpQueryPromptTemplate, systemPrompt } from './prompt.js';
+import { extractJsonFromText, isValidJSON, safeParseJSON, stringifyJSON } from './utils/json.js';
 import { sanitizeReportContent } from './utils/sanitize.js';
-import { researchModel } from './ai/providers.js';
-import { SemanticTextSplitter } from './ai/text-splitter.js';
 
 const output = new OutputManager();
 
@@ -32,7 +19,7 @@ export interface ResearchResult {
   sources: string[];
   methodology: string;
   limitations: string;
-  citations: any[];
+  citations: { reference: string; context?: string }[];
   learnings: string[];
   visitedUrls: string[];
   firecrawlResults: SearchResponse; // Use actual Firecrawl type
@@ -70,22 +57,13 @@ export interface researchProgress {
 // Configuration from environment variables
 const {GEMINI_API_KEY} = process.env;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash"; // Default to gemini-pro
-const {FIRECRAWL_API_KEY, FIRECRAWL_BASE_URL} = process.env;
+
 const CONCURRENCY_LIMIT = parseInt(process.env.CONCURRENCY_LIMIT || "5", 10); // Default to 5
 
 if (!GEMINI_API_KEY) {
   throw new Error('GEMINI_API_KEY environment variable is not set');
 }
 
-if (!FIRECRAWL_API_KEY) {
-  output.log("Warning: FIRECRAWL_API_KEY environment variable is not set.  Firecrawl functionality will be limited.");
-  // Consider throwing an error here instead, depending on your requirements
-}
-
-const firecrawl = new FirecrawlApp({
-  apiKey: FIRECRAWL_API_KEY ?? '',
-  apiUrl: FIRECRAWL_BASE_URL,
-});
 
 const ConcurrencyLimit = CONCURRENCY_LIMIT;
 
@@ -93,6 +71,7 @@ const ConcurrencyLimit = CONCURRENCY_LIMIT;
 const SerpQuerySchema = z.object({
   query: z.string(),
   researchGoal: z.string(),
+
 });
 
 type SerpQuery = { query: string; researchGoal: string; };
@@ -106,6 +85,7 @@ const serpQueryCache = new LRUCache<string, SerpQuery[]>({
 
 // Create LRU cache for final reports
 const reportCache = new LRUCache<string, { __returned: string; __abortController: AbortController; __staleWhileFetching: undefined }>({ // Cache stores report strings
+
   max: 20, // Adjust max size as needed
 });
 
@@ -119,7 +99,7 @@ function logResearchProgress(progressData: ResearchProgress) {
   }
 }
 
-function cacheSearchResults(query: string, results: any) {
+function cacheSearchResults(query: string, results: unknown) {
   const minifiedResultsJson = stringifyJSON(results); // Minified for efficient storage
 
   if (minifiedResultsJson) {
@@ -152,7 +132,7 @@ async function generateSerpQueries({
     // 1. Create a cache key
     let cacheKey: string;
     try {
-      const keyObject: any = { rawQuery, numQueries, researchGoal, initialQuery, depth, breadth };
+      const keyObject: Record<string, unknown> = { rawQuery, numQueries, researchGoal, initialQuery, depth, breadth };
 
       // Omit default values from the cache key
       if (numQueries === DEFAULT_NUM_QUERIES) {
@@ -193,10 +173,8 @@ async function generateSerpQueries({
     }
 
     output.log(`Generating SERP queries for key: ${cacheKey}`);
-
-    const query = escape(rawQuery);
-    const sanitizedLearnings = learnings?.map(escape);
-
+    const query = lodashEscape(rawQuery);
+    const sanitizedLearnings = Array.isArray(learnings) ? learnings.map(lodashEscape) : [];
     const prompt = serpQueryPromptTemplate
       .replace('{{query}}', query)
       .replace('{{numQueries}}', String(numQueries))
@@ -204,54 +182,61 @@ async function generateSerpQueries({
       .replace('{{initialQuery}}', initialQuery || rawQuery)
       .replace('{{depth}}', depth?.toString() || "1")
       .replace('{{breadth}}', breadth?.toString() || "1");
-
     let learningsString = '';
     if (Array.isArray(sanitizedLearnings) && sanitizedLearnings.length > 0) {
       learningsString = sanitizedLearnings.join('\n');
     }
-
     const finalPrompt = prompt.replace('{{learnings.join("\\n")}}', learningsString);
-
     output.log(`generateSerpQueries prompt: ${finalPrompt}`);
-
-    let geminiResult: any;
     let jsonString: string = '{}';
-
     try {
-      geminiResult = await o3MiniModel.generateContent(finalPrompt);
-      output.log('Gemini response:', { response: JSON.parse(JSON.stringify(geminiResult)) });
-
-      const geminiText = await geminiResult.response.text();
+      const geminiText = await callGeminiProConfigurable(finalPrompt, { tools: [{ googleSearch: {} }] });
       if (typeof geminiText === 'string') {
         jsonString = geminiText;
       } else {
         output.log("Error: Gemini response text is not a string or is missing.");
-        jsonString = '{}';
       }
-    } catch (error) {
-      output.log("Gemini error:", { error: error instanceof Error ? error.message : 'Unknown error' });
+    } catch (err) {
+      output.log("Gemini error:", { error: err instanceof Error ? err.message : 'Unknown error' });
+      output.log('Error in generateSerpQueries:', { error: err instanceof Error ? err.message : 'Unknown error' });
       jsonString = '{}';
     }
-
+    if (!isValidJSON(jsonString)) {
+      output.log("Gemini returned non-JSON text; attempting JSON extraction.");
+    }
     const rawQueriesJSON = extractJsonFromText(jsonString);
     let serpQueries: SerpQuery[] = [];
 
     if (rawQueriesJSON && Array.isArray(rawQueriesJSON)) {
-      serpQueries = rawQueriesJSON.slice(0, numQueries)
-        .map((rawQuery: any) => {
-          const parsedQuery = SerpQuerySchema.safeParse({ // Use SerpQuerySchema to parse
-            query: rawQuery?.query || rawQuery, // Handle cases where query is directly a string or in an object
-            researchGoal: researchGoal, // Or get researchGoal from rawQuery if available
+      serpQueries = rawQueriesJSON
+        .slice(0, numQueries)
+        .map((rawQuery: unknown) => {
+          const queryValue = ((): unknown => {
+            if (typeof rawQuery === 'object' && rawQuery !== null && 'query' in rawQuery) {
+              const q = (rawQuery as { query?: unknown }).query;
+              return typeof q === 'string' ? q : q != null ? String(q) : '';
+            }
+            return rawQuery;
+          })();
+          const parsed = SerpQuerySchema.safeParse({
+            query: typeof queryValue === 'string' ? queryValue : String(queryValue ?? ''),
+            researchGoal,
           });
-          return parsedQuery.success ? parsedQuery.data as SerpQuery : null; // Return parsed data or null if parsing fails
+          return parsed.success ? (parsed.data as SerpQuery) : null;
         })
-        .filter(Boolean) as SerpQuery[]; // Filter out null values from failed parses
+        .filter(Boolean) as SerpQuery[];
     } else {
       output.log("Failed to generate or parse SERP queries from Gemini response, using fallback to empty array.");
       serpQueries = [];
     }
 
     // 4. Store the result in the cache
+    // Also persist a minified copy via cacheSearchResults for observability
+    try {
+      cacheSearchResults(rawQuery, serpQueries);
+    } catch (e) {
+      output.log("cacheSearchResults error:", { error: e instanceof Error ? e.message : 'Unknown error' });
+    }
     try {
       serpQueryCache.set(cacheKey, serpQueries);
       output.log(`Cached SERP queries for key: ${cacheKey}`);
@@ -274,9 +259,13 @@ const createResearchSplitter = () => {
     chunkOverlap: 20,
     separators: ['\n\n', '\n', ' ']
   });
+
 };
 
+
+
 // Update processSerpResult to use provider-sanctioned splitter
+
 async function processSerpResult({
   query,
   result,
@@ -286,9 +275,7 @@ async function processSerpResult({
   result: SearchResponse;
   numLearnings?: number;
 }): Promise<{ learnings: string[]; followUpQuestions: string[]; }> {
-  const contents = compact(result.data.map(item => 
-    (item as any).markdown // Type assertion for compatibility
-  ));
+  const contents = compact(result.data.map(item => item.markdown ?? ''));
   const resolvedContents = await Promise.all(contents);
 
   const urls = compact(result.data.map(item => item.url));
@@ -304,17 +291,30 @@ async function processSerpResult({
   } catch (error) {
     output.log(`Text splitting failed: ${error}`);
     return { learnings: [], followUpQuestions: [] };
+
   }
 
+
+
   // Process each chunk with the LLM (batched)
+  const firstUrl = result?.data?.[0]?.url;
+  let derivedTitle = 'No Title';
+  if (typeof firstUrl === 'string') {
+    try {
+      derivedTitle = new URL(firstUrl).hostname || firstUrl;
+    } catch {
+      derivedTitle = firstUrl;
+    }
+  }
+
   const prompts = chunks.map((chunk) =>
     learningPromptTemplate
       .replace("{{query}}", query)
-      .replace("{{title}}", (result.data[0] as any)?.title || "No Title")
-      .replace("{{url}}", result.data[0]?.url || "No URL")
+      .replace("{{title}}", derivedTitle)
+      .replace("{{url}}", typeof firstUrl === 'string' ? firstUrl : "No URL")
       .replace("{{content}}", chunk)
   );
-  const batchResults = await generateBatch(prompts);
+  const batchResults = await generateBatchWithTools(prompts, [{ googleSearch: {} }]);
   const learnings: string[] = [];
   for (const br of batchResults) {
     const text = await br.response.text();
@@ -323,7 +323,9 @@ async function processSerpResult({
       followUpQuestions: z.array(z.string()),
     }).safeParse(JSON.parse(text));
     if (parsedResult.success) {
+
       learnings.push(...(parsedResult.data.learnings ?? []));
+
     }
   }
 
@@ -334,14 +336,9 @@ async function processSerpResult({
 // New helper function to generate an outline from the prompt and learnings (schema-based)
 async function generateOutline(prompt: string, learnings: string[]): Promise<string> {
   try {
-    const schema = {
-      type: 'object',
-      properties: { outline: { type: 'array', items: { type: 'string' } } },
-      required: ['outline'],
-      additionalProperties: false,
-    };
+    const { OutlineJsonSchema: schema } = await import('./types.js');
     const outlinePrompt = `${systemPrompt()}\n\nBased on the prompt and the following learnings, generate a detailed outline as JSON with an 'outline' array.\nPrompt: ${prompt}\nLearnings:\n${learnings.join("\\n")}`;
-    const json = await callGeminiProConfigurable(outlinePrompt, { json: true, schema });
+    const json = await callGeminiProConfigurable(outlinePrompt, { json: true, schema, tools: [{ googleSearch: {} }] });
     let parsed: { outline?: string[] } = {};
     try {
       parsed = JSON.parse(json) as { outline?: string[] };
@@ -359,24 +356,16 @@ async function writeReportFromOutline(outline: string, learnings: string[]): Pro
   const cleanOutline = sanitizeReportContent(outline);
   const cleanLearnings = learnings.map(sanitizeReportContent);
   try {
-    const schema = {
-      type: 'object',
-      properties: {
-        sections: { type: 'array', items: { type: 'string' } },
-        citations: { type: 'array', items: { type: 'string' } }
-      },
-      required: ['sections'],
-      additionalProperties: false,
-    };
+    const { SectionsJsonSchema: schema } = await import('./types.js');
     const reportPrompt = `${systemPrompt()}\n\nUsing the following outline and learnings, produce a JSON with 'sections' (array of markdown strings) and optional 'citations'.\nOutline:\n${cleanOutline}\nLearnings:\n${cleanLearnings.join("\\n")}`;
-    const json = await callGeminiProConfigurable(reportPrompt, { json: true, schema });
+    const json = await callGeminiProConfigurable(reportPrompt, { json: true, schema, tools: [{ googleSearch: {} }] });
     let parsed: { sections?: string[]; citations?: string[] } = {};
     try {
       parsed = JSON.parse(json) as { sections?: string[]; citations?: string[] };
     } catch {}
     const body = (parsed.sections ?? []).join('\n\n');
-    const citations = parsed.citations && parsed.citations.length ? `\n\nReferences:\n${parsed.citations.map(c => `- ${c}`).join('\n')}` : '';
-    return body || 'Report could not be generated.' + citations;
+    const citations = parsed.citations?.length ? `\n\nReferences:\n${parsed.citations.map(c => `- ${c}`).join('\n')}` : '';
+    return body || `Report could not be generated.${citations}`;
   } catch (error) {
     output.log('Error in writeReportFromOutline:', { error });
     return 'Report could not be generated.';
@@ -386,14 +375,9 @@ async function writeReportFromOutline(outline: string, learnings: string[]): Pro
 // New helper function to generate a summary from the learnings (schema-based)
 async function generateSummary(learnings: string[]): Promise<string> {
   try {
-    const schema = {
-      type: 'object',
-      properties: { summary: { type: 'string' } },
-      required: ['summary'],
-      additionalProperties: false,
-    };
+    const { SummaryJsonSchema: schema } = await import('./types.js');
     const summaryPrompt = `${systemPrompt()}\n\nReturn JSON with a single 'summary' string for the following learnings:\nLearnings:\n${learnings.join("\\n")}`;
-    const json = await callGeminiProConfigurable(summaryPrompt, { json: true, schema });
+    const json = await callGeminiProConfigurable(summaryPrompt, { json: true, schema, tools: [{ googleSearch: {} }] });
     let parsed: { summary?: string } = {};
     try {
       parsed = JSON.parse(json) as { summary?: string };
@@ -408,9 +392,12 @@ async function generateSummary(learnings: string[]): Promise<string> {
 // New helper function to generate a title from the prompt and learnings
 async function generateTitle(prompt: string, learnings: string[]): Promise<string> {
   try {
-    const titlePrompt = `${systemPrompt()}\n\nGenerate a concise and informative title for a research report based on the prompt and learnings:\nPrompt: ${prompt}\nLearnings:\n${learnings.join("\\n")}`;
-    const titleResponse = await o3MiniModel.generateContent(titlePrompt);
-    return await titleResponse.response.text();
+    const { TitleJsonSchema: schema } = await import('./types.js');
+    const titlePrompt = `${systemPrompt()}\n\nReturn JSON with a single 'title' for a research report based on the prompt and learnings:\nPrompt: ${prompt}\nLearnings:\n${learnings.join("\\n")}`;
+    const json = await callGeminiProConfigurable(titlePrompt, { json: true, schema, tools: [{ googleSearch: {} }] });
+    let parsed: { title?: string } = {};
+    try { parsed = JSON.parse(json) as { title?: string }; } catch {}
+    return typeof parsed.title === 'string' ? parsed.title : 'Untitled Research Report';
   } catch (error) {
     output.log('Error in generateTitle:', { error });
     return 'Title could not be generated.';
@@ -439,7 +426,7 @@ async function deepResearch({
   learnings: initialLearnings = [],
   visitedUrls: initialVisitedUrls = [],
   onProgress,
-  reportProgress = (progress: any) => {
+  reportProgress = (progress: ResearchProgress) => {
     output.log('Research Progress:', progress);
   },
   initialQuery = query,
@@ -447,7 +434,6 @@ async function deepResearch({
 }: DeepResearchOptions): Promise<ResearchResult> {
   let visitedUrls = [...initialVisitedUrls];
   let learnings = [...initialLearnings];
-
   // Initialize progress object
   let progress: ResearchProgress = {
     currentDepth: depth,
@@ -479,23 +465,22 @@ async function deepResearch({
   });
 
   const limit = pLimit(ConcurrencyLimit);
-
   const limitedProcessResult = async (serpQuery: SerpQuery): Promise<ProcessResult> => {
+    output.log(`Processing serp query: ${serpQuery.query}...`);
     let newLearnings: string[] = [];
     let newUrls: string[] = [];
-
     try {
       output.log(`Generating Gemini prompt for query: ${serpQuery.query}...`);
       const prompt = generateGeminiPrompt({ query: serpQuery.query, researchGoal: serpQuery.researchGoal, learnings });
-      output.log("Gemini Prompt: " + prompt.substring(0, 200) + "..."); // Log first 200 chars of prompt
-      const geminiResponseText = await callGeminiProConfigurable(prompt);
-
+      output.log(`Gemini Prompt: ${prompt.substring(0, 200)}...`); // Log first 200 chars of prompt
+      const geminiResponseText = await callGeminiProConfigurable(prompt, { tools: [{ googleSearch: {} }] });
       const geminiResult = await processGeminiResponse(geminiResponseText);
       newLearnings = geminiResult.learnings;
       newUrls = geminiResult.urls;
 
       if (visitedUrls.includes(serpQuery.query)) {
         output.log(`Already visited URL for query: ${serpQuery.query}, skipping.`);
+
         return {
           analysis: '',
           content: '',
@@ -511,18 +496,10 @@ async function deepResearch({
 
       try {
         output.log(`Firecrawl scraping for query: ${serpQuery.query}...`);
-        const result = await firecrawl.search(
-          serpQuery.query,
-          {
-            timeout: 15000,
-            limit: breadth,
-            scrapeOptions: { formats: ['markdown'] },
-          }
-        );
-
+        // Firecrawl disabled in Gemini-only mode
+        const result = { data: [] };
         // Add type assertion to result to ensure TypeScript knows the structure
         const firecrawlResult = result as { data?: Array<{ url?: string }> };
-
         if (!firecrawlResult || !firecrawlResult.data) {
           output.log(`Invalid Firecrawl result for query: ${serpQuery.query}`);
           return {
@@ -549,7 +526,8 @@ async function deepResearch({
           result: { ...result, metadata: { success: true, error: '' } } as SearchResponse,
           numLearnings: 3,
         });
-        const newLearnings = processResult?.learnings ?? []; // Assign here to pre-declared variable
+        newLearnings = processResult?.learnings ?? []; // Assign to the outer variable to avoid shadowing
+
         const allLearnings = [...learnings, ...newLearnings];
         const allUrls = [...visitedUrls, ...newUrls];
 
@@ -571,15 +549,15 @@ async function deepResearch({
           if (onProgress) {
             onProgress(progress);
           }
+          // Structured local progress log as well
+          logResearchProgress(progress);
 
           // Enhanced Query Refinement
           // const keywords = extractKeywords(query + " " + learnings.join(" ")); // Keyword extraction and query expansion functions are not defined in the provided code.
           // const refinedQuery = expandQuery(serpQuery.researchGoal, keywords);
-
           // const nextQuery = refinedQuery; // Using original query for now as refinement is not implemented
           const nextQuery = serpQuery.query; // Using original query for now as refinement is not implemented
-
-          return deepResearch({
+          const deeper = await deepResearch({
             query: nextQuery,
             breadth: newBreadth,
             depth: newDepth,
@@ -590,13 +568,24 @@ async function deepResearch({
             initialQuery,
             researchGoal,
           });
+          return {
+            analysis: deeper.analysis,
+            content: deeper.content,
+            sources: deeper.sources,
+            methodology: deeper.methodology,
+            limitations: deeper.limitations,
+            citations: deeper.citations.map(c => c.reference),
+            learnings: deeper.learnings,
+            visitedUrls: deeper.visitedUrls,
+            firecrawlResults: deeper.firecrawlResults,
+          };
         } else {
           output.log("Reached maximum research depth.");
           return {
             analysis: geminiResult.analysis || 'No analysis available',
             content: newLearnings.join('\n\n'),
             sources: [],
-            methodology: 'Semantic chunking with Gemini Flash 2.0',
+            methodology: 'Semantic chunking with Gemini Flash 2.5',
             limitations: 'Current implementation focuses on text analysis only',
             citations: [],
             learnings: newLearnings,
@@ -650,20 +639,20 @@ async function deepResearch({
     analysis: '',
     content: learnings.join('\n\n'),
     sources: [],
-    methodology: 'Semantic chunking with Gemini Flash 2.0',
+    methodology: 'Semantic chunking with Gemini Flash 2.5',
     limitations: 'Current implementation focuses on text analysis only',
     citations: [],
     learnings: learnings,
     visitedUrls: visitedUrls,
-    firecrawlResults: { metadata: {}, ...result } as SearchResponse,
+    firecrawlResults: { metadata: { success: false, error: 'Firecrawl disabled' }, data: [] } as SearchResponse,
   };
 
-  // Process Firecrawl results into the report
-  const firecrawlResponse = await firecrawl.search(query);
-  
+  // Firecrawl disabled in Gemini-only mode
+  const firecrawlResponse = { data: [], metadata: { success: false, error: 'Firecrawl disabled' } } as SearchResponse;
+
   return {
     ...processedData,
-    firecrawlResults: { metadata: { success: false, error: 'No metadata' }, ...firecrawlResponse } as unknown as SearchResponse,
+    firecrawlResults: firecrawlResponse,
   };
 }
 
@@ -681,7 +670,7 @@ export async function writeFinalReport({
   // 1. Create cache key
   let cacheKey: string;
   try {
-    const keyObject: any = { prompt };
+    const keyObject: Record<string, unknown> = { prompt };
     const learningsHash = learnings.length > 0 ? String(learnings.reduce((acc, val) => acc + val.charCodeAt(0), 0)) : ''; // Hash learnings
     keyObject.learningsHash = learningsHash;
     const visitedUrlsHash = visitedUrls.length > 0 ? String(visitedUrls.reduce((acc, val) => acc + val.charCodeAt(0), 0)) : ''; // Hash visitedUrls (optional)
@@ -754,7 +743,7 @@ ${visitedUrls.map(url => `- ${url}`).join('\n')}
 
   // 3. Store report in cache
   try {
-    reportCache.set(cacheKey, { 
+    reportCache.set(cacheKey, {
       __returned: finalReportContent,
       __abortController: new AbortController(),
       __staleWhileFetching: undefined
@@ -771,7 +760,6 @@ ${visitedUrls.map(url => `- ${url}`).join('\n')}
 
 export async function research(options: ResearchOptions): Promise<ResearchResult> {
   output.log(`Starting research for query: ${options.query}`);
-
   const researchResult = await deepResearch({
     query: options.query,
     depth: options.depth,
@@ -800,20 +788,13 @@ export interface ResearchOptions {
     onProgress?: (progress: ResearchProgress) => void;
 }
 
-async function someFunction() {
-  const textToEmbed = "This is the text I want to embed.";
-  const embedding = await generateTextEmbedding(textToEmbed);
-
-  if (embedding) {
-    output.log("Generated Embedding:", { embedding });
-    // ... use the embedding for semantic search, clustering, etc. ...
-  } else {
-    output.log("Failed to generate text embedding.");
-  }
+interface GeminiItem {
+  learning?: string;
+  learnings?: string[];
+  url?: string;
 }
-
 interface GeminiResponse {
-    items: any[]; // Assuming 'items' is always an array, adjust if needed
+  items: GeminiItem[];
 }
 
 interface ProcessedGeminiResponse {
@@ -823,31 +804,36 @@ interface ProcessedGeminiResponse {
     citations: { reference: string; context: string }[];
 }
 
+
 async function processGeminiResponse(geminiResponseText: string): Promise<ProcessedGeminiResponse> {
   const responseData = safeParseJSON<GeminiResponse>(geminiResponseText, { items: [] });
 
-  let learnings: string[] = [];
-  let urls: string[] = [];
-
+  const learnings: string[] = [];
+  const urls: string[] = [];
+  let sanitizedLearnings: string[] | undefined;
   if (Array.isArray(responseData.items)) {
     responseData.items.forEach(item => {
       // Add strict filtering for final research content
-      if (item?.learning && typeof item.learning === 'string' && 
+      if (item?.learning && typeof item.learning === 'string' &&
           !item.learning.includes('INTERNAL PROCESS:') &&
           !item.learning.startsWith('OUTLINE:') &&
           !item.learning.match(/^Step \d+:/)) {
         learnings.push(item.learning.trim());
       }
-      
+      if (item?.learnings && item.learnings.length > 0) {
+        learnings.push(...item.learnings);
+      }
       // Keep URL extraction as-is
       if (item?.url && typeof item.url === 'string') {
         urls.push(item.url.trim());
       }
     });
-    
+
     // Add final sanitization before return
-    learnings = learnings.map(l => l.replace(/\[.*?\]/g, '').trim()).filter(l => l.length > 0);
+    sanitizedLearnings = learnings.map(l => l.replace(/\[.*?\]/g, '').trim()).filter(l => l.length > 0);
   }
+
+
 
   // Extract citations from response text
   const citationMatches = geminiResponseText.match(/\[\[\d+\]\]/g) || [];
@@ -855,28 +841,24 @@ async function processGeminiResponse(geminiResponseText: string): Promise<Proces
     reference: match,
     context: geminiResponseText.split(match)[1]?.split('.')[0] || '' // Get first sentence after citation
   }));
-
   return {
     analysis: '',
-    learnings: learnings.slice(0, 10),
+    learnings: (sanitizedLearnings ?? learnings).slice(0, 10),
     urls: Array.from(new Set(urls)),
     citations
   };
 }
 
-export function validateAcademicInput(input: string) {
-  return input.length > 10 && input.split(/\s+/).length >= 3;
+export function validateAcademicInput(input: string): boolean {
+  return input.length > 10 && input.trim().split(/\s+/).length >= 3;
 }
 
-export function validateAcademicOutput(text: string) {
-  const validationMetrics = {
-    citationDensity: (text.match(/\[\[\d+\]\]/g) || []).length / (text.split(/\s+/).length / 100),
-    recentSources: (text.match(/\[\[\d{4}\]\]/g) || []).filter(yr => parseInt(yr) > 2019).length,
-    conflictDisclosures: text.includes("Conflict Disclosure:") ? 1 : 0
-  };
-  return validationMetrics.citationDensity > 1.5 && 
-         validationMetrics.recentSources > 3 &&
-         validationMetrics.conflictDisclosures === 1;
+export function validateAcademicOutput(text: string): boolean {
+  const citationDensity = (text.match(/\[\[\d+\]\]/g) || []).length / (text.split(/\s+/).length / 100);
+  const recentSources = (text.match(/\[\[\d{4}\]\]/g) || [])
+    .filter((yr: string) => Number.parseInt(yr.replace(/[^\d]/g, ''), 10) > 2019).length;
+  const conflictDisclosures = text.includes('Conflict Disclosure:') ? 1 : 0;
+  return citationDensity > 1.5 && recentSources > 3 && conflictDisclosures === 1;
 }
 
 // Update conductResearch to use real sources
@@ -886,29 +868,27 @@ export async function conductResearch(
 ): Promise<ResearchResult> {
   const splitter = new SemanticTextSplitter();
   const chunks = await splitter.splitText(query);
+  // Use depth to limit how many chunks we process in this pass
+  const limitedChunks = chunks.slice(0, Math.max(1, depth));
   // Batch model calls for all chunks
-  const prompts = chunks.map((chunk) => ({
+  const prompts = limitedChunks.map((chunk: string) => ({
     contents: [{ role: 'user', parts: [{ text: chunk }] }]
   }));
   const batch = await generateBatch(prompts);
   const results = await Promise.all(batch.map(b => b.response.text()));
-  
-  // Get actual Firecrawl results
-  const firecrawlResponse = await firecrawl.search(query);
-  
+  // Firecrawl disabled in Gemini-only mode
+  const firecrawlResponse = { data: [], metadata: { success: false, error: 'Firecrawl disabled' } } as SearchResponse;
   return {
     content: results.join('\n\n'),
-    sources: firecrawlResponse.data
-      .map(result => result.url)
-      .filter((url): url is string => typeof url === 'string'), // Type guard
+    sources: [],
     methodology: 'Semantic chunking with Gemini Flash 2.0',
     limitations: 'Current implementation focuses on text analysis only',
     citations: results.flatMap((r: string) =>
       (r.match(/\[\[\d+\]\]/g) || []).map((ref: string) => ({ reference: ref }))
     ), // Extract citations from content
-    learnings: [],    
+    learnings: [],
     visitedUrls: [],
-    firecrawlResults: { metadata: { success: false, error: 'No metadata' }, ...firecrawlResponse } as unknown as SearchResponse,
+    firecrawlResults: firecrawlResponse,
     analysis: ''
   };
 }
@@ -929,7 +909,7 @@ const createEmptyResearchResult = (): ResearchResult => ({
 // Add type-safe firecrawl result handling
 interface FirecrawlResult {
   url?: string;
-  // Add other expected properties
+  markdown?: string | Promise<string>;
 }
 
 // Update the SearchResponse interface to include metadata
@@ -938,9 +918,17 @@ interface SearchResponse {
   metadata: { success: boolean; error: string }; // Add metadata property
 }
 
-// Then use in processFirecrawlData:
-const processFirecrawlData = (result: any): SearchResponse => ({
-  data: (result?.data || []).filter((item: FirecrawlResult): item is FirecrawlResult => !!item?.url),
-  metadata: result?.metadata || { success: false, error: 'No metadata' } // Now matches interface
-});
+// Type guard helpers
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
 
+// Then use in processFirecrawlData:
+const processFirecrawlData = (result: unknown): SearchResponse => {
+  const dataRaw = isObject(result) && Array.isArray(result.data) ? (result.data as unknown[]) : [];
+  const data = dataRaw.filter((item: unknown): item is FirecrawlResult => isObject(item) && typeof item.url === 'string');
+  const metadata = isObject(result) && isObject(result.metadata)
+    ? (result.metadata as { success?: unknown; error?: unknown })
+    : {};
+  const success = typeof (metadata.success) === 'boolean' ? metadata.success : false;
+  const error = typeof (metadata.error) === 'string' ? metadata.error : 'No metadata';
+  return { data, metadata: { success, error } };
+};

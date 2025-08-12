@@ -1,19 +1,18 @@
 import { LRUCache } from 'lru-cache';
-import pRetry from 'p-retry';
 import { z } from 'zod';
 
-import { o3MiniModel } from './ai/providers.js';
+import { callGeminiProConfigurable } from './ai/providers.js';
 import { OutputManager } from './output-manager.js';
 import { feedbackPromptTemplate, systemPrompt } from './prompt.js';
-import { 
+import {
   validateAcademicInput,
   validateAcademicOutput,
   conductResearch
 } from './deep-research.js';
-import { 
+import {
   generateProgressBar as terminalProgressBar,
   TERMINAL_CONTROLS,
-  getTerminalDimensions 
+  getTerminalDimensions
 } from './terminal-utils.js';
 
 interface FeedbackOptions {
@@ -31,7 +30,6 @@ const output = new OutputManager();
 const FEEDBACK_CACHE_CONFIG = {
   max: 100,
   ttl: 300_000, // 5 minutes
-  sizeCalculation: (value: FeedbackResponse) => JSON.stringify(value).length,
   dispose: (value: FeedbackResponse) => {
     OutputManager.logCacheEviction(value);
   }
@@ -125,11 +123,11 @@ type ProgressBarParams = {
   label: string;
 };
 
-function generateProgressBar({ 
+function generateProgressBar({
   current,
   total,
   width = 30,
-  label 
+  label
 }: ProgressBarParams): string {
   const filled = Math.round((width * current) / total);
   return `${label} [${'█'.repeat(filled)}${' '.repeat(width - filled)}]`;
@@ -151,7 +149,7 @@ export async function generateFeedback({
   // 1. Create cache key
   let cacheKey: string;
   try {
-    const keyObject: any = { query, numQuestions, researchGoal, depth, breadth, existingLearnings };
+    const keyObject: Record<string, unknown> = { query, numQuestions, researchGoal, depth, breadth, existingLearnings };
     // Omit default values for a more efficient key (optional, as before)
     if (numQuestions === 3) {
       delete keyObject.numQuestions;
@@ -169,7 +167,7 @@ export async function generateFeedback({
     keyObject.learningsHash = learningsHash;
     cacheKey = JSON.stringify(keyObject);
   } catch (keyError) {
-    console.error("Error creating feedback cache key:", keyError);
+    output.log("Error creating feedback cache key:", { error: keyError instanceof Error ? keyError.message : String(keyError) });
     cacheKey = 'default-feedback-key'; // Fallback key in case of error
   }
 
@@ -181,7 +179,7 @@ export async function generateFeedback({
       return cachedFeedback;
     }
   } catch (cacheGetError) {
-    output.log("Cache error:", { 
+    output.log("Cache error:", {
       error: cacheGetError instanceof Error ? cacheGetError.message : 'Unknown cache error'
     });
   }
@@ -203,37 +201,71 @@ Existing Learnings: ${existingLearnings.join('\n')}
     .replace("{{numQuestions}}", String(numQuestions)) // Replace numQuestions placeholder
   }`;
 
-  let feedbackResponse: FeedbackResponse = { 
+  let feedbackResponse: FeedbackResponse = {
     analysis: "Initial feedback response.",
-    followUpQuestions: [] // Add required array
+    followUpQuestions: []
   };
+  const { width } = getTerminalDimensions();
+  let localProgress = 0;
+  const totalSteps = 3; // prompt build, API+parse, cache
   try {
     output.log(`Generating feedback for query: "${query}"...`); // Log using OutputManager
-    const response = await o3MiniModel.generateContent(geminiPrompt);
-    const text = await response.response.text();
-    if (!text) {
-      throw new Error('Empty Gemini API response.');
+    // Render initial progress bar (uses local generateProgressBar)
+    try {
+      const bar = generateProgressBar({ current: localProgress, total: totalSteps, width: Math.max(10, width - 20), label: 'Feedback' });
+      process.stdout.write(`${TERMINAL_CONTROLS.cursorHide}${bar}`);
+    } catch {}
+
+    const { FeedbackResponseJsonSchema } = await import('./types.js');
+    localProgress = 1;
+    try {
+      const bar = generateProgressBar({ current: localProgress, total: totalSteps, width: Math.max(10, width - 20), label: 'Feedback' });
+      process.stdout.write(`\r${bar}`);
+    } catch {}
+    let jsonText = await callGeminiProConfigurable(
+      `${systemPrompt()}\n\nReturn ONLY JSON matching the schema.\n${geminiPrompt}`,
+      { json: true, schema: FeedbackResponseJsonSchema, tools: [{ googleSearch: {} }] }
+    );
+
+    // First parse attempt
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(jsonText);
+      feedbackResponse = FeedbackResponseSchema.parse(parsed);
+      output.log(`Parsed Feedback Response (JSON):\n${JSON.stringify(feedbackResponse, null, 2)}`);
+    } catch (jsonError) {
+      output.log(`Feedback JSON parse/validation error: ${jsonError}`);
+      output.log(`Attempting single repair pass.`);
+      // One repair pass: ask model to fix to schema
+      jsonText = await callGeminiProConfigurable(
+        `${systemPrompt()}\n\nYour previous output did not match the schema. Repair it to valid JSON that matches strictly. Return ONLY JSON.\nSchema: ${JSON.stringify(FeedbackResponseJsonSchema)}\nPrevious:\n${jsonText}`,
+        { json: true, schema: FeedbackResponseJsonSchema, tools: [{ googleSearch: {} }] }
+      );
+      try {
+        parsed = JSON.parse(jsonText);
+        feedbackResponse = FeedbackResponseSchema.parse(parsed);
+        output.log(`Repair pass succeeded.`);
+      } catch (repairError) {
+        output.log(`Repair pass failed: ${repairError}`);
+        feedbackResponse = {
+          analysis: "Failed to parse feedback response after repair.",
+          followUpQuestions: []
+        };
+      }
     }
 
-    // Attempt to parse JSON response from Gemini
+    // Update progress for cache step
+    localProgress = 2;
     try {
-      feedbackResponse = FeedbackResponseSchema.parse(JSON.parse(text)); // Parse with Zod
-      output.log(`Parsed Feedback Response (JSON):\n${JSON.stringify(feedbackResponse, null, 2)}`); // Log parsed JSON
-    } catch (jsonError) {
-      output.log(`Error parsing Gemini JSON response: ${jsonError}`);
-      output.log(`Raw Gemini Response causing JSON error:\n${text}`); // Log the problematic raw response
-      // Consider setting a default or error feedback response here if JSON parsing fails critically
-      feedbackResponse = {
-        analysis: "Failed to parse feedback response. Please check logs for raw output.",
-        followUpQuestions: [] // Add required array
-      }; // Provide a fallback
-    }
+      const bar = generateProgressBar({ current: localProgress, total: totalSteps, width: Math.max(10, width - 20), label: 'Feedback' });
+      process.stdout.write(`\r${bar}`);
+    } catch {}
 
     // Validate output before returning
     const isValidOutput = validateAcademicOutput(feedbackResponse.analysis || '');
     if (!isValidOutput) {
       output.log('Generated feedback failed academic validation');
-      return { 
+      return {
         analysis: 'Unable to generate valid feedback',
         followUpQuestions: [] // Required by Zod schema
       };
@@ -243,17 +275,23 @@ Existing Learnings: ${existingLearnings.join('\n')}
     try {
       feedbackCache.set(cacheKey, feedbackResponse);
       output.log(`Cached feedback for key: ${cacheKey}`);
-    } catch (cacheSetError) {
-      console.error("Error setting feedback to cache:", cacheSetError);
+    } catch (cacheSetError: unknown) {
+      output.log("Error setting feedback to cache:", { error: cacheSetError instanceof Error ? cacheSetError.message : String(cacheSetError) });
     }
-
-  } catch (apiError) {
+  } catch (apiError: unknown) {
     output.log(`Gemini API error during feedback generation: ${apiError}`);
-    feedbackResponse = { 
+    feedbackResponse = {
       analysis: "Error generating feedback. Please check API key and logs.",
       followUpQuestions: [] // Add required array
     }; // API error fallback
   } finally {
-    return feedbackResponse; // Return the feedback response object (either parsed or fallback)
+    try {
+      // Complete bar to 100%
+      const bar = generateProgressBar({ current: totalSteps, total: totalSteps, width: Math.max(10, width - 20), label: 'Feedback' });
+      process.stdout.write(`\r${bar}${TERMINAL_CONTROLS.cursorShow}\n`);
+    } catch {
+      process.stdout.write(TERMINAL_CONTROLS.cursorShow);
+    }
   }
+  return feedbackResponse; // Return the feedback response object (either parsed or fallback)
 }

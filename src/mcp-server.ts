@@ -1,11 +1,13 @@
 import { config } from 'dotenv';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { research, writeFinalReport, type ResearchProgress, ResearchOptions } from "./deep-research.js";
+import { research, writeFinalReport, type ResearchProgress, type ResearchOptions } from "./deep-research.js";
 import { LRUCache } from 'lru-cache';
+import { logger } from './logger.js';
 
 
 // Get the directory name of the current module
@@ -14,18 +16,10 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url));
 // Load environment variables from .env.local
 config({ path: resolve(__dirname, '../.env.local') });
 
-// Helper function to log to stderr
-const log = (...args: any[]) => {
-  process.stderr.write(`${args.map(arg =>
-    typeof arg === 'string' ? arg : JSON.stringify(arg)
-  ).join(' ')}\n`);
-};
-
 // Log environment variables for debugging (excluding sensitive values)
-log('Environment check:', {
-  hasOpenAiKey: !!process.env.GEMINI_API_KEY,
-  hasFirecrawlKey: !!process.env.FIRECRAWL_API_KEY
-});
+logger.info({ env: {
+  hasGeminiKey: !!process.env.GEMINI_API_KEY,
+}}, 'Environment check');
 
 // Change the interface name in mcp-server.ts to avoid conflict
 interface MCPResearchResult {
@@ -38,78 +32,75 @@ interface MCPResearchResult {
             totalSources: number;
         };
     };
-    [key: string]: any;
+    [key: string]: unknown;
 }
 
-// Update cache definition
+// Update cache definition with TTL aligned to provider
+const MCP_CACHE_TTL_MS = Math.max(1000, Math.min(86_400_000, parseInt(process.env.PROVIDER_CACHE_TTL_MS || '600000', 10)));
 const deepResearchCache = new LRUCache<string, MCPResearchResult>({
-  max: 20,
+  max: 50,
+  ttl: MCP_CACHE_TTL_MS,
 });
+
+function hashKey(obj: unknown): string {
+  try {
+    return createHash('sha256').update(JSON.stringify(obj)).digest('hex');
+  } catch {
+    return String(obj);
+  }
+}
 
 const server = new McpServer({
   name: "deep-research",
   version: "1.0.0"
 });
 
-// Define the deep research tool
-server.tool(
-  "deep-research",
-  "Perform deep research on a topic using AI-powered web search",
+// Define the deep research tool (modern API)
+server.registerTool(
+  "deepResearch.run",
   {
-    query: z.string().min(1).describe("The research query to investigate"),
-    depth: z.number().min(1).max(5).describe("How deep to go in the research tree (1-5)"),
-    breadth: z.number().min(1).max(5).describe("How broad to make each research level (1-5)"),
-    existingLearnings: z.array(z.string()).optional().describe("Optional array of existing research findings to build upon")
-  },
-  async ({ query, depth, breadth, existingLearnings = [] }): Promise<MCPResearchResult | { content: { type: "text"; text: string; }[]; isError: boolean; }> => {
-    // 1. Create cache key
-    let cacheKey: string;
-    try {
-      const keyObject: any = { query, depth, breadth, existingLearnings };
-      cacheKey = JSON.stringify(keyObject);
-    } catch (keyError) {
-      log("Error creating cache key:", keyError);
-      return { content: [{ type: "text", text: "Error creating cache key" }], isError: true }; // Return an error response
+    title: "Deep Research",
+    description: "Gemini-only deep research pipeline (Google Search grounding + URL context).",
+    inputSchema: {
+      query: z.string().min(1).describe("The research query to investigate"),
+      depth: z.number().min(1).max(5).optional().describe("How deep to go in the research tree (1-5)"),
+      breadth: z.number().min(1).max(5).optional().describe("How broad to make each research level (1-5)"),
+      existingLearnings: z.array(z.string()).optional().describe("Optional learnings to build upon"),
+      goal: z.string().optional().describe("Optional goal/brief to steer synthesis"),
+      flags: z.object({ grounding: z.boolean().optional(), urlContext: z.boolean().optional() }).optional(),
     }
+  },
+  async ({ query, depth, breadth, existingLearnings = [] }): Promise<MCPResearchResult> => {
+    // 1. Create cache key
+    const cacheKey = hashKey({ query, depth, breadth, existingLearnings });
 
     // 2. Check cache
-    try {
-      const cachedResult = deepResearchCache.get(cacheKey);
-      if (cachedResult) {
-        log("Returning cached result for query:", query);
-        return cachedResult;
-      }
-    } catch (cacheGetError) {
-      log("Error getting result from cache:", cacheGetError);
-      // Continue without cache if there's an error
+    const cachedResult = deepResearchCache.get(cacheKey);
+    if (cachedResult) {
+      logger.info({ key: cacheKey.slice(0,8), query }, '[mcp-cache] HIT');
+      return cachedResult;
+    } else {
+      logger.info({ key: cacheKey.slice(0,8), query }, '[mcp-cache] MISS');
     }
 
     try {
-      log("Starting research with query:", query);
+      logger.info({ query }, 'Starting research');
       const result = await research({
         query,
         depth: depth ?? 3,
         breadth: breadth ?? 3,
         existingLearnings: existingLearnings,
         onProgress: (progress: ResearchProgress) => {
-          // Basic progress logging
-          log(`Progress: ${progress.progressMsg}`);
-
-          // Send progress notification with the text message
-          // server.server.notification({ //NOTE: server.server is undefined - remove one `.server`
-          //   method: "notifications/progress",
-          //   params: {
-          //     progressToken: 0,
-          //     data: progressMsg
-          //   }
-          // })
-          // .catch(error => {
-          //   log("Error sending progress notification:", error);
-          // });
+          // Basic progress logging; MCP notifications can be added when client expects them
+          const depthPct = progress.totalDepth > 0 ? (progress.totalDepth - progress.currentDepth) / progress.totalDepth : 0;
+          const breadthPct = progress.totalBreadth > 0 ? (progress.totalBreadth - progress.currentBreadth) / progress.totalBreadth : 0;
+          const queriesPct = progress.totalQueries > 0 ? progress.completedQueries / progress.totalQueries : 0;
+          const overall = Math.round(((depthPct + breadthPct + queriesPct) / 3) * 100);
+          logger.info({ overall, progress }, 'Progress update');
         }
       } as ResearchOptions);
 
-      log("Research completed, generating report...");
+      logger.info({ query }, 'Research completed, generating report...');
 
       // Generate final report
       const report = await writeFinalReport({
@@ -118,7 +109,7 @@ server.tool(
         visitedUrls: result.visitedUrls
       });
 
-      log("Report generated successfully");
+      logger.info({ query }, 'Report generated successfully');
 
       const finalResult: MCPResearchResult = {
         content: [
@@ -138,39 +129,49 @@ server.tool(
       };
 
       // 4. Store result in cache
-      try {
-        deepResearchCache.set(cacheKey, finalResult);
-        log("Stored result in cache for query:", query);
-      } catch (cacheSetError) {
-        log("Error storing result in cache:", cacheSetError);
-      }
+      deepResearchCache.set(cacheKey, finalResult);
+      logger.info({ query }, 'Stored result in cache');
 
       return finalResult;
     } catch (error) {
-      log("Error in deep research:", error);
       const errorMessage = error instanceof Error ? error.message : String(error);
-      log("Error message:", errorMessage);
-
+      logger.error({ err: errorMessage }, 'Error during deep research');
       return {
-        content: [
-          {
-            type: "text",
-            text: `Error during deep research: ${errorMessage}`
-          }
-        ],
-        isError: true
-      };
+        content: [{ type: "text", text: `Error during deep research: ${errorMessage}` }],
+        metadata: { learnings: [], visitedUrls: [], stats: { totalLearnings: 0, totalSources: 0 } }
+      } as MCPResearchResult;
     }
   }
 );
 
-// Start the MCP server
-const transport = new StdioServerTransport(process.stdin, process.stdout);
-server.connect(transport) // Pass the transport instance to server.connect()
-  .then(() => {
-    log("MCP server running");
+// Expose capabilities as a simple resource (Gemini-only flags)
+server.registerResource(
+  "capabilities",
+  "mcp://capabilities",
+  {
+    title: "Server Capabilities",
+    description: "Feature flags and environment info",
+    mimeType: "application/json"
+  },
+  async (uri) => ({
+    contents: [{
+      uri: uri.href,
+      text: JSON.stringify({
+        name: "deep-research",
+        version: "1.0.0",
+        geminiModel: process.env.GEMINI_MODEL || "gemini-2.5-flash",
+        googleSearchEnabled: (process.env.ENABLE_GEMINI_GOOGLE_SEARCH || 'true').toLowerCase() === 'true',
+        urlContextEnabled: (process.env.ENABLE_URL_CONTEXT || 'true').toLowerCase() === 'true',
+        functionsEnabled: (process.env.ENABLE_GEMINI_FUNCTIONS || 'false').toLowerCase() === 'true',
+        codeExecEnabled: (process.env.ENABLE_GEMINI_CODE_EXECUTION || 'false').toLowerCase() === 'true',
+        providerCacheTtlMs: MCP_CACHE_TTL_MS,
+      })
+    }]
   })
-  .catch((err: Error) => { // Add type annotation to 'err'
-    console.error("MCP server error:", err);
-    log("MCP server error:", err);
-  });
+);
+
+// Start the MCP server
+const transport = new StdioServerTransport();
+server.connect(transport)
+  .then(() => { logger.info('MCP server running'); })
+  .catch((err: Error) => { logger.error({ err }, 'MCP server error'); });
