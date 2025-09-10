@@ -1,0 +1,67 @@
+config_schema:
+  type: object
+  required:
+    - GEMINI_API_KEY
+  properties:
+    GEMINI_API_KEY:
+      type: string
+      format: password
+      description: Google Gemini API key (get one from https://makersuite.google.com/app/apikey)
+    GEMINI_MODEL:
+      type: string
+      default: gemini-2.5-flash
+      description: Gemini model to use (default gemini-2.5-flash, usually don't change)
+    GEMINI_MAX_OUTPUT_TOKENS:
+      type: integer
+      default: 65536
+      description: Maximum output tokens for Gemini responses
+    CONCURRENCY_LIMIT:
+      type: integer
+      default: 5
+      description: Maximum concurrent Gemini requests
+    ENABLE_GEMINI_GOOGLE_SEARCH:
+      type: boolean
+      default: true
+      description: Enable Google Search Grounding tool
+    ENABLE_GEMINI_CODE_EXECUTION:
+      type: boolean
+      default: false
+      description: Enable code execution tool
+    ENABLE_GEMINI_FUNCTIONS:
+      type: boolean
+      default: false
+      description: Enable Gemini functions tool
+server_name: deep-research
+command: npx
+args:
+  - -y
+  - npm
+  - install
+  - '&&'
+  - npm
+  - run
+  - build
+  - '&&'
+  - node
+  - dist/mcp-server.js
+env:
+  - name: GEMINI_API_KEY
+    value: config.GEMINI_API_KEY
+  - name: GEMINI_MODEL
+    value: config.GEMINI_MODEL
+  - name: GEMINI_MAX_OUTPUT_TOKENS
+    value: config.GEMINI_MAX_OUTPUT_TOKENS
+  - name: CONCURRENCY_LIMIT
+    value: config.CONCURRENCY_LIMIT
+  - name: ENABLE_GEMINI_GOOGLE_SEARCH
+    value: config.ENABLE_GEMINI_GOOGLE_SEARCH
+  - name: ENABLE_GEMINI_CODE_EXECUTION
+    value: config.ENABLE_GEMINI_CODE_EXECUTION
+  - name: ENABLE_GEMINI_FUNCTIONS
+    value: config.ENABLE_GEMINI_FUNCTIONS
+description: |
+  An AI-powered research assistant that performs iterative, deep research on any topic by combining search engines, web scraping, and Gemini 2.5 LLMs. Runs as a Model Context Protocol (MCP) server for seamless integration with AI agents. Supports configurable research depth, breadth, and use of Gemini tools. Requires a Google Gemini API key.
+owner: Ojhkmhoiuyhi
+license: MIT
+package: deep-research
+vendor: Ojhkmhoiuyhi
